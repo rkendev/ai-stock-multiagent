@@ -1,0 +1,32 @@
+# Environment
+.env
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+.venv/
+
+# Data and outputs
+data/
+output/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Mac/Linux system files
+.DS_Store
+*.swp
+
+# Secrets
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtualenvs
+venv/
+.venv/

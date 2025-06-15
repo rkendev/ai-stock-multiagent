@@ -1,0 +1,12 @@
+pandas
+yfinance
+transformers
+torch
+langchain
+langgraph
+streamlit
+python-dotenv
+feedparser
+ numpy==1.24.4
+ openai
+ 

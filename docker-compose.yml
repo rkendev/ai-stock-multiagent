@@ -1,0 +1,17 @@
+services:
+  dev:
+    build: .
+    image: ai-stock-multiagent-dev
+    gpus: all
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    command: bash
+    stdin_open: true
+    tty: true
+    env_file:
+      - .env
+    environment:
+      - DATA_ROOT=data
+      - DATA_DIR=data
+      - OUTPUT_ROOT=output
