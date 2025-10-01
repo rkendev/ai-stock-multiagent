@@ -1,112 +1,243 @@
 # ai-stock-multiagent
 
-**Multi-Agent Stock Market Analyst**
+**Multi-Agent Stock Market Analyst (portfolio-ready capstone)**
 
-A proof-of-concept AI pipeline that orchestrates multiple agents to perform end-to-end stock analysis for any ticker:
+This project orchestrates a small team of AI agents to analyze a stock end-to-end and generate a Markdown research report. It’s designed to showcase modern AI orchestration, data engineering, and practical ML/NLP:
 
-- **Data Ingestion**: Fetches historical price data, fundamentals, and news.
-- **Agent Analysis**:
-  - Researcher: Aggregates and stores RSS news items.
-  - Sentiment Analyst: Labels headlines using a finance-specific LLM pipeline.
-  - Fundamental Analyst: Computes key financial metrics and growth rates.
-  - Technical Analyst: Derives moving averages and RSI, flags overbought/oversold.
-- **Reporter**: Synthesizes all agent outputs into a Markdown research report via the OpenAI API.
-- **Orchestrator**: Single-script workflow to run all agents sequentially and generate the final report.
+- **Ingestion** – prices (Yahoo Finance), fundamentals (yfinance), and news (RSS).
+- **Agents**
+  - **Researcher**: collects recent headlines (RSS).
+  - **Sentiment**: labels headlines with a finance-tuned sentiment pipeline (Transformers).
+  - **Fundamental**: computes simple growth/ratio metrics from quarterly data.
+  - **Technical**: computes MA50 and RSI(14), flags overbought.
+  - **Reporter**: synthesizes everything (LLM). Default: OpenAI; pluggable interface for local LLMs.
+- **Orchestrator** – runs the whole pipeline and writes a final report.
 
-## Features
+---
 
-- **Modular** architecture with clear separation of concerns.
-- **OO Design** for the Reporter to support multiple LLM backends (OpenAI, local models, etc.).
-- **Fully tested** codebase with pytest for each component.
-- **Dockerized** dev environment with GPU support through NVIDIA CUDA on WSL2.
+## Contents
 
-## Getting Started
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Quick Start (Docker)](#quick-start-docker)
+- [Quick Start (Local Ubuntu)](#quick-start-local-ubuntu)
+- [Environment Variables](#environment-variables)
+- [Usage](#usage)
+- [Tests](#tests)
+- [Project Structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap / Next Steps](#roadmap--next-steps)
+- [License](#license)
 
-### Prerequisites
+---
 
-- Docker & Docker Compose
-- NVIDIA GPU + CUDA drivers (optional, for accelerated inference)
-- (Optional) Python 3.10+ and virtualenv for local development
-- OpenAI API key (for the Reporter agent)
+## Architecture
 
-### Installation
 
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/yourusername/ai-stock-multiagent.git
-   cd ai-stock-multiagent
-   ```
-2. Create a `.env` file at the project root:
-   ```ini
-   OPENAI_API_KEY=sk-...
-   ```
-3. Build and spin up the dev container:
-   ```bash
-   docker compose build
-   docker compose run dev
-   ```
 
-## Usage
+ingest/
+prices -> data/<TICKER>/prices.parquet
+fundamentals -> data/<TICKER>/fundamentals.csv
+news -> data/<TICKER>/news/rss_*.json
 
-### Ingest & Agents
+agents/
+researcher -> output/researcher/<TICKER>/news_.json
+sentiment -> output/sentiment/<TICKER>/sentiment_.json
+fundamental-> output/fundamental/<TICKER>/fundamental_.json
+technical -> output/technical/<TICKER>/technical_.json
+reporter -> output/<TICKER>/reporter/report_*.md (LLM synthesis)
 
-Inside the container shell:
+orchestrator (sequential): ingest -> researcher/sentiment -> fundamental/technical -> reporter
 
-```bash
-# Fetch prices, fundamentals, news
-PYTHONPATH=src python src/ingest/prices.py --ticker AAPL --since 2024-01-01
+
+---
+
+## Requirements
+
+- **Docker** & **Docker Compose** (recommended)
+- Optional GPU acceleration (NVIDIA + CUDA) for faster Transformers
+- Or run **locally** with **Python 3.10+**
+- **OpenAI API key** for the Reporter agent (if using OpenAI)
+
+> Data and outputs are ignored by git via `.gitignore`. Do **not** commit secrets or `.env`.
+
+---
+
+## Quick Start (Docker)
+
+1) Create a `.env` at repo root (or export variables in your shell):
+
+```ini
+# .env
+OPENAI_API_KEY=sk-...           # Required for OpenAI Reporter
+# Optional overrides:
+# OUTPUT_ROOT=output
+# TRANSFORMERS_CACHE=/root/.cache/huggingface
+
+
+Build & start a dev shell:
+
+docker compose build
+docker compose run dev
+
+
+Inside the container:
+
+# Run end-to-end for a ticker with a start date
+PYTHONPATH=src python src/agents/orchestrator.py AAPL 2024-06-01
+# Final report: output/AAPL/reporter/report_<timestamp>.md
+
+Quick Start (Local Ubuntu)
+
+Tested on Ubuntu 24.04 (works in VMs like VirtualBox):
+
+sudo apt update
+sudo apt install -y python3-venv python3-pip
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Optional: speed up Hugging Face downloads for the Sentiment agent
+export TRANSFORMERS_CACHE="$HOME/.cache/huggingface"
+
+# OpenAI key if using the Reporter
+export OPENAI_API_KEY=sk-...
+
+# Verify
+PYTHONPATH=src pytest -q
+
+# Run end-to-end
+PYTHONPATH=src python src/agents/orchestrator.py AAPL 2024-06-01
+
+Environment Variables
+Variable	Required	Default	Purpose
+OPENAI_API_KEY	Yes*	—	Needed for OpenAIReporter (Reporter agent).
+OUTPUT_ROOT	No	output	Root folder where agents write their outputs.
+TRANSFORMERS_CACHE	No	HF default	Cache directory for Hugging Face models (speeds up Sentiment agent).
+SENTIMENT_MODEL	No	internal	(Optional) Override the Transformers model for Sentiment experiments.
+
+*Only required if you run the Reporter with OpenAI. The reporter is pluggable—swap in a local model via the same interface if preferred.
+
+Usage
+Run individual components
+# Ingest
+PYTHONPATH=src python src/ingest/prices.py --ticker AAPL --since 2024-06-01
 PYTHONPATH=src python src/ingest/fundamentals.py --ticker AAPL
 PYTHONPATH=src python src/ingest/news.py --ticker AAPL --limit 20
 
-# Run specialized agents
+# Agents
 PYTHONPATH=src python src/agents/researcher.py --ticker AAPL --limit 20
 PYTHONPATH=src python src/agents/sentiment.py  --ticker AAPL --limit 20
 PYTHONPATH=src python src/agents/fundamental.py --ticker AAPL
 PYTHONPATH=src python src/agents/technical.py   --ticker AAPL
-``` 
 
-### Generating the Report
-
-```bash
+# Reporter (OpenAI by default; requires OPENAI_API_KEY)
 PYTHONPATH=src python src/agents/reporter.py --ticker AAPL
-# Output saved at output/reporter/AAPL/report_<timestamp>.md
-```
+# -> output/<TICKER>/reporter/report_<timestamp>.md
 
-### Full Pipeline with Orchestrator
+Full pipeline
+PYTHONPATH=src python src/agents/orchestrator.py AAPL 2024-06-01
 
-```bash
-PYTHONPATH=src python orchestrator.py AAPL 2024-01-01
-```
 
-## Running Tests
+Notes:
 
-```bash
-# From inside the container (or with PYTHONPATH=src locally)
-pytest -q
-```
+The orchestrator accepts a ticker and optional since date.
 
-## Project Structure
+It runs ingestion, then analysis agents, then the reporter.
 
-```
+All components respect OUTPUT_ROOT where applicable.
+
+Tests
+# Docker container shell or local venv
+PYTHONPATH=src pytest -q
+
+
+First run may download a large Transformers model for the Sentiment agent. Use TRANSFORMERS_CACHE to avoid repeated downloads.
+
+Project Structure
+.
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-├── orchestrator.py
-├── .env.example    # template for your .env
+├── .gitignore
+├── README.md
 ├── src
-│   ├── ingest      # data ingestion scripts
-│   ├── agents      # multi-agent analysis modules
-│   └── tests       # pytest unit tests
-└── output          # generated data & reports (ignored)
-```
+│   ├── ingest
+│   │   ├── prices.py
+│   │   ├── fundamentals.py
+│   │   └── news.py
+│   ├── agents
+│   │   ├── researcher.py
+│   │   ├── sentiment.py
+│   │   ├── fundamental.py
+│   │   ├── technical.py
+│   │   ├── reporter.py
+│   │   └── orchestrator.py
+│   └── tests
+│       ├── test_prices.py
+│       ├── test_fundamentals.py
+│       ├── test_news.py
+│       ├── test_researcher.py
+│       ├── test_sentiment.py
+│       ├── test_fundamental_agent.py
+│       ├── test_technical_agent.py
+│       └── test_orchestrator.py
+└── output/         # generated artifacts (ignored by git)
 
-## Next Steps
+Troubleshooting
 
-- Prompt engineering & few-shot examples for richer reports
-- Embed charts & visualizations in the Markdown
-- Experiment with local LLM backends
-- Parallelize ingestion and analysis for speed
+OpenAI: APIRemovedInV1 / openai.ChatCompletion errors
+We use the new openai>=1.0 client (from openai import OpenAI). If you see legacy API errors, upgrade:
 
-## License
+pip install --upgrade openai
 
-MIT © Your Name
+
+Sentiment model download is slow
+Set a cache dir and keep it between runs:
+
+export TRANSFORMERS_CACHE="$HOME/.cache/huggingface"
+
+
+GPU not used
+
+In Docker, ensure --gpus all is enabled by compose (NVIDIA Container Toolkit installed).
+
+In local, verify PyTorch sees the GPU:
+
+import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))
+
+
+ModuleNotFoundError: ingest when running tests
+Always run with PYTHONPATH=src:
+
+PYTHONPATH=src pytest -q
+
+
+FileNotFoundError: data/<TICKER>/prices.parquet
+Run price ingestion first (or the orchestrator), e.g.:
+
+PYTHONPATH=src python src/ingest/prices.py --ticker AAPL --since 2024-06-01
+
+Roadmap / Next Steps
+
+Prompt engineering for the Reporter (few-shot, structured outputs).
+
+Visualization agent: embed charts (price vs. MA50, sentiment over time) into the Markdown.
+
+Parallelization: run ingest steps concurrently to speed up end-to-end time.
+
+Local LLMs: add a LocalLlamaReporter implementing the same BaseReporter interface.
+
+Streamlit UI: simple viewer for latest report + charts.
+
+CI: GitHub Actions to run PYTHONPATH=src pytest -q on PRs.
+
+License
+
+MIT © 2025 Your Name
+
+
+---
+
+Want me to also add a minimal **GitHub Actions** CI workflow or a tiny **Streamlit** viewer stub in another branch?
+::contentReference[oaicite:0]{index=0}
