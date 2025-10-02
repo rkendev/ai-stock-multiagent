@@ -1,3 +1,4 @@
+# .github/workflows/ci.yml
 name: CI
 
 on:
@@ -14,11 +15,11 @@ jobs:
     env:
       # Prevent accidental network calls to OpenAI during tests
       OPENAI_API_KEY: "test-only-no-network"
-      # Cache location for HF models (sentiment agent); keeps runs fast after first cache
-      TRANSFORMERS_CACHE: ${{ runner.temp }}/hf_cache
+      # Use a workspace-local cache dir for HF models (no runner context)
+      TRANSFORMERS_CACHE: ${{ github.workspace }}/.hf_cache
       # Ensure imports work like locally
       PYTHONPATH: src
-      # Optional: if your code supports a small sentiment model via env
+      # Optional: point tests to a tiny model if/when you add support
       # SENTIMENT_MODEL: sshleifer/tiny-distilroberta-base
 
     steps:
@@ -55,7 +56,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # helpful for nicer pytest output
           pip install pytest
 
       - name: Run tests
