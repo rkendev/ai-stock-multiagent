@@ -1,3 +1,20 @@
+# src/agents/orchestrator.py
+"""
+Simple orchestrator that runs the full pipeline end-to-end.
+
+Order:
+  1) Ingest: prices, fundamentals, news
+  2) Researcher -> Sentiment
+  3) Fundamental agent -> Technical agent
+  4) Reporter (LLM) to synthesize a markdown report
+
+Notes:
+  - This module shells out to each script with the current interpreter.
+  - Keep arguments small and explicit; the called scripts do their own I/O.
+"""
+
+from __future__ import annotations
+
 import argparse
 import os
 import shlex
@@ -14,69 +31,86 @@ def mkdirp(path: str) -> None:
 
 def build_cmd(template: str, **kwargs) -> List[str]:
     """
-    Expand a shell template into argv list, substituting only the placeholders
-    provided plus {py} for the current interpreter.
+    Expand a shell template into an argv list, substituting placeholders and
+    splitting safely with shlex.split.
+
+    Placeholders available:
+      {py}      -> sys.executable
+      {ticker}  -> ticker symbol
+      {since}   -> ISO date
+      {limit}   -> integer limit
+      {model}   -> LLM model name
+      {temp}    -> LLM temperature (float)
 
     Example:
         build_cmd("{py} src/ingest/prices.py --ticker {ticker} --since {since}",
                   ticker="AAPL", since="2024-06-01")
     """
-    values = {"py": sys.executable}
-    # Accept any subset of kwargs (tests may pass only some of them)
-    for k, v in kwargs.items():
-        values[k] = str(v)
-
-    try:
-        rendered = template.format(**values)
-    except KeyError as e:
-        # Give a clearer error if a required placeholder wasn't provided
-        missing = e.args[0]
-        raise KeyError(f"Missing placeholder value for {{{missing}}} in template: {template}") from e
-
-    return shlex.split(rendered)
+    filled = template.format(py=shlex.quote(sys.executable), **kwargs)
+    return shlex.split(filled)
 
 
-def run_cmd(template: str, **kwargs) -> None:
-    """Render a command from template and run it, streaming output."""
+def run(template: str, **kwargs) -> None:
+    """Format and execute a command template, logging the exact command."""
     argv = build_cmd(template, **kwargs)
-    print("Running:", " ".join(argv), flush=True)
+    print("Running:", " ".join(shlex.quote(a) for a in argv), flush=True)
     subprocess.run(argv, check=True)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Simple orchestrator to run the agents end-to-end.")
-    p.add_argument("ticker", help="Ticker symbol, e.g., AAPL")
-    p.add_argument("since", nargs="?", default=None, help="Optional start date, e.g., 2024-06-01")
-    p.add_argument("--limit", type=int, default=20, help="News/sentiment limit")
+    p = argparse.ArgumentParser(description="Pipeline orchestrator")
+    p.add_argument("ticker", help="Ticker symbol, e.g. AAPL")
+    p.add_argument(
+        "--since",
+        default="2024-06-01",
+        help="Start date for price/history (YYYY-MM-DD). Default: %(default)s",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Max news items to fetch/analyze. Default: %(default)s",
+    )
+    p.add_argument(
+        "--model",
+        default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        help="Reporter LLM model. Default: %(default)s",
+    )
+    p.add_argument(
+        "--temp",
+        type=float,
+        default=0.2,
+        help="Reporter LLM temperature. Default: %(default)s",
+    )
     args = p.parse_args()
 
-    ticker = args.ticker
-    since = args.since
-    limit = args.limit
-
-    # Ensure output root exists (honor OUTPUT_ROOT if set)
-    output_root = os.getenv("OUTPUT_ROOT", "output")
-    mkdirp(output_root)
+    # Ensure output root exists (agents/scripts create their own subdirs)
+    mkdirp("output")
 
     # Ingest
-    if since:
-        run_cmd("{py} src/ingest/prices.py --ticker {ticker} --since {since}", ticker=ticker, since=since)
-    else:
-        # If no since is provided, just fetch 1 year back as a default example
-        default_since = (datetime.now(timezone.utc).date().replace(year=datetime.now(timezone.utc).year - 1)).isoformat()
-        run_cmd("{py} src/ingest/prices.py --ticker {ticker} --since {since}", ticker=ticker, since=default_since)
+    run("{py} src/ingest/prices.py --ticker {ticker} --since {since}",
+        ticker=args.ticker, since=args.since)
+    run("{py} src/ingest/fundamentals.py --ticker {ticker}",
+        ticker=args.ticker)
+    run("{py} src/ingest/news.py --ticker {ticker} --limit {limit}",
+        ticker=args.ticker, limit=args.limit)
 
-    run_cmd("{py} src/ingest/fundamentals.py --ticker {ticker}", ticker=ticker)
-    run_cmd("{py} src/ingest/news.py --ticker {ticker} --limit {limit}", ticker=ticker, limit=limit)
+    # Analysis
+    run("{py} src/agents/researcher.py --ticker {ticker} --limit {limit}",
+        ticker=args.ticker, limit=args.limit)
+    run("{py} src/agents/sentiment.py --ticker {ticker} --limit {limit}",
+        ticker=args.ticker, limit=args.limit)
+    run("{py} src/agents/fundamental.py --ticker {ticker}",
+        ticker=args.ticker)
+    run("{py} src/agents/technical.py --ticker {ticker}",
+        ticker=args.ticker)
 
-    # Agents
-    run_cmd("{py} -m agents.researcher --ticker {ticker} --limit {limit}", ticker=ticker, limit=limit)
-    run_cmd("{py} -m agents.sentiment --ticker {ticker} --limit {limit}", ticker=ticker, limit=limit)
-    run_cmd("{py} -m agents.fundamental --ticker {ticker}", ticker=ticker)
-    run_cmd("{py} -m agents.technical --ticker {ticker}", ticker=ticker)
+    # Reporter (LLM)
+    run("{py} src/agents/reporter.py --ticker {ticker} --model {model} --temp {temp}",
+        ticker=args.ticker, model=args.model, temp=args.temp)
 
-    # Reporter (OpenAI by default). ReporterAgent honors OUTPUT_ROOT automatically.
-    run_cmd("{py} -m agents.reporter --ticker {ticker}", ticker=ticker)
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    print(f"[Orchestrator] Completed for {args.ticker} at {ts}", flush=True)
 
 
 if __name__ == "__main__":

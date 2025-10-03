@@ -3,6 +3,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+
 from typing import Optional
 
 try:
@@ -125,7 +126,6 @@ class ReporterAgent:
         out_dir = os.path.join(self.output_root, ticker, "reporter")
         os.makedirs(out_dir, exist_ok=True)
 
-        from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out_path = os.path.join(out_dir, f"report_{ts}.md")
 

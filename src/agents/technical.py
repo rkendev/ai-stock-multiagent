@@ -3,7 +3,9 @@
 import argparse
 import json
 import os
-from datetime import datetime
+
+OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "output")
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -55,9 +57,9 @@ def main():
     args = p.parse_args()
 
     out = run_technical(args.ticker)
-    out_dir = os.path.join("output", "technical", args.ticker)
+    out_dir = os.path.join(OUTPUT_ROOT, "technical", args.ticker)
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_path = os.path.join(out_dir, f"technical_{ts}.json")
 
     with open(out_path, "w") as f:

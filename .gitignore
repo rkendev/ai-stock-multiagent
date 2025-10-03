@@ -1,32 +1,56 @@
-# Environment
-.env
+# Secrets / environment
+.env                # local secrets file (do not commit)
+.env.*              # cover .env.local, .env.test, etc
 
-# Python bytecode
+# Python bytecode / caches
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Virtual environment
+# Virtual environments
 venv/
+.env/
 .venv/
+ENV/
+env/
 
-# Data and outputs
+# Project outputs / runtime data
 data/
 output/
+*.log
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+.cache/
+htmlcov/
+*.cover
+*.coveragerc
+nosetests.xml
+coverage.xml
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+
+# IDE / editor
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# System files
+.DS_Store
+Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
 
-# Mac/Linux system files
-.DS_Store
-*.swp
-
-# Secrets
-.env
-
-# Python cache
-__pycache__/
-*.py[cod]
-
-# Virtualenvs
-venv/
-.venv/
+# Misc
+*.so           # compiled shared objects (if any C extensions)

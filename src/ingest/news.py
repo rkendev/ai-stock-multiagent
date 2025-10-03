@@ -1,9 +1,9 @@
+from datetime import datetime, timezone
 # src/ingest/news.py
 import argparse
 import json
 import os
 from datetime import datetime
-
 import feedparser
 
 def fetch_rss_news(ticker: str, limit: int = 20):
@@ -36,7 +36,7 @@ def main():
     os.makedirs(json_dir, exist_ok=True)
 
     # Timestamped file for repeatability
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_path = os.path.join(json_dir, f"rss_{ts}.json")
     with open(out_path, "w", encoding="utf8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
