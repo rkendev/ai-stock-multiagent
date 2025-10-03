@@ -2,7 +2,7 @@
 import argparse
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ingest.news import fetch_rss_news
 
@@ -24,7 +24,7 @@ def main():
     # Write to output folder
     out_dir = os.path.join("output", "researcher", args.ticker)
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_path = os.path.join(out_dir, f"news_{ts}.json")
 
     with open(out_path, "w", encoding="utf8") as f:

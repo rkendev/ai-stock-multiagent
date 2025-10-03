@@ -9,3 +9,6 @@ python-dotenv
 feedparser
 numpy>=1.26.4,<3
 openai
+typer==0.12.3
+click==8.1.7
+rich==13.7.1

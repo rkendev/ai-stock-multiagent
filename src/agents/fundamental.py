@@ -3,6 +3,9 @@
 import argparse
 import json
 import os
+from datetime import datetime, timezone
+
+OUTPUT_ROOT = os.environ.get("OUTPUT_ROOT", "output")
 import pandas as pd
 
 # Allow tests or environment to override the data root
@@ -39,9 +42,9 @@ def main():
     args = p.parse_args()
 
     out = run_fundamental(args.ticker)
-    out_dir = os.path.join("output", "fundamental", args.ticker)
+    out_dir = os.path.join(OUTPUT_ROOT, "fundamental", args.ticker)
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_path = os.path.join(out_dir, f"fundamental_{ts}.json")
 
     with open(out_path, "w") as f:
@@ -49,5 +52,4 @@ def main():
     print(f"[Fundamental] Wrote metrics to {out_path}")
 
 if __name__ == "__main__":
-    from datetime import datetime
     main()

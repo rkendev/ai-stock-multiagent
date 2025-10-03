@@ -135,6 +135,29 @@ PYTHONPATH=src python src/agents/technical.py   --ticker AAPL
 PYTHONPATH=src python src/agents/reporter.py --ticker AAPL
 # -> output/<TICKER>/reporter/report_<timestamp>.md
 
+### Unified CLI (optional)
+
+You can drive everything via a single CLI:
+
+```bash
+# Help
+PYTHONPATH=src python -m cli --help
+
+# Ingest
+PYTHONPATH=src python -m cli ingest prices --ticker AAPL --since 2024-06-01
+PYTHONPATH=src python -m cli ingest fundamentals --ticker AAPL
+PYTHONPATH=src python -m cli ingest news --ticker AAPL --limit 20
+
+# Agents
+PYTHONPATH=src python -m cli agent researcher --ticker AAPL --limit 20
+PYTHONPATH=src python -m cli agent sentiment  --ticker AAPL --limit 20
+PYTHONPATH=src python -m cli agent fundamental --ticker AAPL
+PYTHONPATH=src python -m cli agent technical   --ticker AAPL
+PYTHONPATH=src python -m cli agent reporter    --ticker AAPL --model gpt-4o-mini --temp 0.3
+
+# Full pipeline
+PYTHONPATH=src python -m cli run AAPL 2024-06-01
+
 Full pipeline
 PYTHONPATH=src python src/agents/orchestrator.py AAPL 2024-06-01
 
