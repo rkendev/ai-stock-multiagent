@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 
 from typing import Optional
+from pathlib import Path
+
 
 try:
     # New-style OpenAI client (openai>=1.0)
@@ -134,6 +136,24 @@ class ReporterAgent:
 
         print(f"[Reporter] Wrote report to {out_path}")
         return out_path
+
+def _maybe_append_charts_section(report_md: str, ticker: str, report_path: Path) -> str:
+    """
+    If output/visuals/<ticker> has known charts, append a '## Charts' section.
+    Compute RELATIVE paths from the report file to the images so that they render
+    when opening the markdown in-place.
+    """
+    visuals = Path("output") / "visuals" / ticker
+    cand = [visuals / "price_ma50.png", visuals / "sentiment.png"]
+    imgs = [p for p in cand if p.exists()]
+    if not imgs:
+        return report_md
+
+    lines = ["", "## Charts", ""]
+    for p in imgs:
+        rel = os.path.relpath(p, start=report_path.parent)
+        lines.append(f"![{p.name}]({rel})")
+    return report_md + "\n".join(lines) + "\n"
 
 
 def main():
