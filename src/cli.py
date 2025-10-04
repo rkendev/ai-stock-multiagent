@@ -136,6 +136,14 @@ def agent_reporter(
     sys.argv = argv
     reporter_main()
 
+@agent_app.command("visualizer")
+def agent_visualizer(
+    ticker: str = typer.Option(..., "--ticker", "-t", help="Ticker symbol"),
+):
+    from agents.visualizer import main as visualizer_main  # type: ignore
+    sys.argv = ["visualizer.py", "--ticker", ticker]
+    visualizer_main()    
+
 # Orchestrator integration
 def _call_orchestrator(
     ticker: str,

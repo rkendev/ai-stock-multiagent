@@ -74,6 +74,7 @@ def orchestrate(
     run_cmd(f"src/agents/sentiment.py --ticker {shlex.quote(ticker)} --limit {news_limit}")
     run_cmd(f"src/agents/fundamental.py --ticker {shlex.quote(ticker)}")
     run_cmd(f"src/agents/technical.py --ticker {shlex.quote(ticker)}")
+    run_cmd(["src/agents/visualizer.py", "--ticker", ticker])    
     run_cmd(f"src/agents/reporter.py --ticker {shlex.quote(ticker)}")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
