@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   unit:
-    name: Unit tests (no network)
+    name: Unit tests (not integration)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -30,25 +30,25 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
 
-      # Minimal dummy env so reporter code paths can import safely.
+      # Minimal dummy env so reporter paths can import safely without hitting the API.
       - name: Run unit tests
         env:
           OPENAI_API_KEY: dummy
           REPORTER_MODEL: gpt-4o-mini
           REPORTER_TEMPERATURE: "0.2"
         run: |
-          PYTHONPATH=src pytest -q -m "unit" --disable-warnings --maxfail=1
+          PYTHONPATH=src pytest -q -m "not integration" --disable-warnings --maxfail=1
 
   integration:
-    name: Integration tests (network OK)
-    # Only on main and manual runs to keep PRs fast
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    name: Integration tests (main/manual)
+    # Keep PRs fast: only run on main or manual dispatch
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -68,11 +68,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest yfinance
+          pip install pytest
 
       - name: Run integration tests
         env:
