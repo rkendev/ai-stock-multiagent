@@ -9,6 +9,9 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional, List, Union
 
+from agents.prompt_manager import PromptManager
+from agents.prompt_executor import StubExecutor, PromptExecutor
+
 
 def mkdirp(path: str) -> None:
     """Create directories recursively (like mkdir -p)."""
@@ -79,6 +82,37 @@ def orchestrate(
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     print(f"[orchestrator] Completed {ticker} at {ts}", flush=True)
+
+
+def orchestrate_with_prompt_flow(
+    ticker: str, since: str, use_prompt_v2: bool = False
+) -> None:
+    """
+    If use_prompt_v2 is True, use PromptManager + PromptExecutor to drive agent runs.
+    Else fallback to classic behavior.
+    """
+    if not use_prompt_v2:
+        return orchestrate(ticker, since)  # your existing orchestrator
+
+    pm = PromptManager()
+    executor: PromptExecutor = StubExecutor()
+
+    agents = pm.list_agents()
+    prompts = {ag: pm.render(ag, ticker=ticker, since=since, topic="analysis")
+               for ag in agents}
+
+    print("[prompt flow] prompts:", prompts)
+
+    responses = {}
+    for ag, prompt in prompts.items():
+        resp = executor.execute(ag, prompt, context={"ticker": ticker, "since": since})
+        responses[ag] = resp
+        print(f"[prompt flow] {ag} → {resp}")
+
+    # After responses collected, decide which actual agent runs to spawn
+    # For now: run all (you can refine logic later)
+    for ag in agents:
+        run_cmd(["src/agents/" + ag + ".py", "--ticker", ticker, "--since", since])
 
 
 def main() -> None:

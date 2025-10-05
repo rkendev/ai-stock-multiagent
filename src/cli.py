@@ -14,10 +14,9 @@ except ImportError:
     load_dotenv = None
     find_dotenv = None
 
+
 def _load_env(env_file: Optional[str] = None) -> None:
-    """
-    Load environment variables from .env (or given env_file) into os.environ.
-    """
+    """Load environment variables from .env (or given env_file) into os.environ."""
     if load_dotenv is None:
         return
     if env_file:
@@ -27,10 +26,12 @@ def _load_env(env_file: Optional[str] = None) -> None:
         if path:
             load_dotenv(path, override=False)
 
+
 # Load .env at import time (so CLI commands see OPENAI_API_KEY etc.)
 _load_env()
 
 app = typer.Typer(help="Multi-Agent Stock CLI", no_args_is_help=True)
+
 
 @app.callback()
 def _global_options(
@@ -41,14 +42,20 @@ def _global_options(
     if env_file:
         _load_env(env_file)
 
+
 def env_or(value: Optional[str], env_key: str, fallback: Optional[str]) -> Optional[str]:
     if value is not None:
         return value
     return os.environ.get(env_key, fallback)
 
-# Ingest commands
+
+# =====================================================
+# INGEST COMMANDS
+# =====================================================
+
 ingest_app = typer.Typer(help="Data ingestion commands")
 app.add_typer(ingest_app, name="ingest")
+
 
 @ingest_app.command("prices")
 def ingest_prices(
@@ -59,6 +66,7 @@ def ingest_prices(
     sys.argv = ["prices.py", "--ticker", ticker, "--since", since]
     prices_main()
 
+
 @ingest_app.command("fundamentals")
 def ingest_fundamentals(
     ticker: str = typer.Option(..., "--ticker", "-t", help="Ticker symbol"),
@@ -66,6 +74,7 @@ def ingest_fundamentals(
     from ingest.fundamentals import main as fundamentals_main  # type: ignore
     sys.argv = ["fundamentals.py", "--ticker", ticker]
     fundamentals_main()
+
 
 @ingest_app.command("news")
 def ingest_news(
@@ -76,9 +85,14 @@ def ingest_news(
     sys.argv = ["news.py", "--ticker", ticker, "--limit", str(limit)]
     news_main()
 
-# Agent commands
+
+# =====================================================
+# AGENT COMMANDS
+# =====================================================
+
 agent_app = typer.Typer(help="Agent commands")
 app.add_typer(agent_app, name="agent")
+
 
 @agent_app.command("researcher")
 def agent_researcher(
@@ -89,6 +103,7 @@ def agent_researcher(
     sys.argv = ["researcher.py", "--ticker", ticker, "--limit", str(limit)]
     researcher_main()
 
+
 @agent_app.command("sentiment")
 def agent_sentiment(
     ticker: str = typer.Option(..., "--ticker", "-t", help="Ticker symbol"),
@@ -98,6 +113,7 @@ def agent_sentiment(
     sys.argv = ["sentiment.py", "--ticker", ticker, "--limit", str(limit)]
     sentiment_main()
 
+
 @agent_app.command("fundamental")
 def agent_fundamental(
     ticker: str = typer.Option(..., "--ticker", "-t", help="Ticker symbol"),
@@ -105,6 +121,7 @@ def agent_fundamental(
     from agents.fundamental import main as fundamental_main  # type: ignore
     sys.argv = ["fundamental.py", "--ticker", ticker]
     fundamental_main()
+
 
 @agent_app.command("technical")
 def agent_technical(
@@ -114,20 +131,16 @@ def agent_technical(
     sys.argv = ["technical.py", "--ticker", ticker]
     technical_main()
 
+
 @agent_app.command("reporter")
 def agent_reporter(
     ticker: str = typer.Option(..., "--ticker", "-t", help="Ticker symbol"),
-    model: Optional[str] = typer.Option(
-        None, "--model", "-m", help="LLM model id (default from env REPORTER_MODEL)"
-    ),
-    temp: Optional[float] = typer.Option(
-        None, "--temp", help="LLM temperature (default from env REPORTER_TEMPERATURE)"
-    ),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model id"),
+    temp: Optional[float] = typer.Option(None, "--temp", help="LLM temperature"),
 ):
     from agents.reporter import main as reporter_main  # type: ignore
     model_val = env_or(model, "REPORTER_MODEL", None)
     temp_val = env_or(None if temp is None else str(temp), "REPORTER_TEMPERATURE", None)
-
     argv = ["reporter.py", "--ticker", ticker]
     if model_val:
         argv += ["--model", model_val]
@@ -136,15 +149,20 @@ def agent_reporter(
     sys.argv = argv
     reporter_main()
 
+
 @agent_app.command("visualizer")
 def agent_visualizer(
     ticker: str = typer.Option(..., "--ticker", "-t", help="Ticker symbol"),
 ):
     from agents.visualizer import main as visualizer_main  # type: ignore
     sys.argv = ["visualizer.py", "--ticker", ticker]
-    visualizer_main()    
+    visualizer_main()
 
-# Orchestrator integration
+
+# =====================================================
+# ORCHESTRATION + PROMPT V2 SUPPORT
+# =====================================================
+
 def _call_orchestrator(
     ticker: str,
     since: Optional[str],
@@ -153,22 +171,26 @@ def _call_orchestrator(
     skip_prices: bool,
     skip_fundamentals: bool,
     parallel_ingest: bool = False,
+    use_prompt_v2: bool = False,
 ) -> None:
-    # Try to import orchestrate function
+    """Call orchestrator, optionally with Prompt v2 support."""
     try:
         import agents.orchestrator as orch  # type: ignore
-        fn = getattr(orch, "orchestrate", None)
-        if fn and callable(fn):
-            fn(
-                ticker=ticker,
-                since=since,
-                news_limit=news_limit,
-                skip_news=skip_news,
-                skip_prices=skip_prices,
-                skip_fundamentals=skip_fundamentals,
-                parallel_ingest=parallel_ingest,
-            )
-            return
+        if use_prompt_v2 and hasattr(orch, "orchestrate_with_prompt_flow"):
+            fn = orch.orchestrate_with_prompt_flow
+        else:
+            fn = orch.orchestrate
+
+        fn(
+            ticker=ticker,
+            since=since,
+            news_limit=news_limit,
+            skip_news=skip_news,
+            skip_prices=skip_prices,
+            skip_fundamentals=skip_fundamentals,
+            parallel_ingest=parallel_ingest,
+        )
+        return
     except ImportError:
         pass
 
@@ -178,13 +200,15 @@ def _call_orchestrator(
         cmd += ["--since", since]
     if parallel_ingest:
         cmd += ["--parallel-ingest"]
-    # pass other options if needed (skip flags)
+    if use_prompt_v2:
+        cmd += ["--use-prompt-v2"]
 
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     env = _merge_dotenv(env)
     print(f"Fallback run: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, env=env)
+
 
 def _merge_dotenv(env: dict) -> dict:
     if find_dotenv:
@@ -193,6 +217,7 @@ def _merge_dotenv(env: dict) -> dict:
             from dotenv import dotenv_values  # type: ignore
             env.update({k: v for k, v in dotenv_values(path).items() if v is not None})
     return env
+
 
 @app.command("run")
 def run_pipeline(
@@ -204,8 +229,9 @@ def run_pipeline(
     skip_prices: bool = typer.Option(False, "--skip-prices", help="Skip price ingestion"),
     skip_fundamentals: bool = typer.Option(False, "--skip-fundamentals", help="Skip fundamentals ingestion"),
     parallel: bool = typer.Option(False, "--parallel-ingest", "-p", help="Run ingestion in parallel"),
+    use_prompt_v2: bool = typer.Option(False, "--use-prompt-v2", help="Enable new Prompt v2 orchestrator flow"),
 ):
-    """Orchestrate full pipeline: ingest → analyze → reporter."""
+    """Run full pipeline: ingest → analyze → reporter, optionally with Prompt v2."""
     since = since_opt or since_arg
     _call_orchestrator(
         ticker=ticker,
@@ -215,32 +241,13 @@ def run_pipeline(
         skip_prices=skip_prices,
         skip_fundamentals=skip_fundamentals,
         parallel_ingest=parallel,
+        use_prompt_v2=use_prompt_v2,
     )
 
-@app.command("orchestrate")
-def orchestrate_alias(
-    ticker: str = typer.Argument(..., help="Ticker symbol"),
-    since_arg: Optional[str] = typer.Argument(None, help="Optional since date"),
-    since_opt: Optional[str] = typer.Option(None, "--since", "-s", help="Since date"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Limit news/sentiment"),
-    skip_news: bool = typer.Option(False, "--skip-news", help="Skip news ingestion"),
-    skip_prices: bool = typer.Option(False, "--skip-prices", help="Skip prices ingestion"),
-    skip_fundamentals: bool = typer.Option(False, "--skip-fundamentals", help="Skip fundamentals ingestion"),
-    parallel: bool = typer.Option(False, "--parallel-ingest", "-p", help="Run ingestion in parallel"),
-):
-    since = since_opt or since_arg
-    _call_orchestrator(
-        ticker=ticker,
-        since=since,
-        news_limit=limit,
-        skip_news=skip_news,
-        skip_prices=skip_prices,
-        skip_fundamentals=skip_fundamentals,
-        parallel_ingest=parallel,
-    )
 
 def get_app() -> typer.Typer:
     return app
+
 
 if __name__ == "__main__":
     app()
