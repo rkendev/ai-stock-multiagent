@@ -1,7 +1,11 @@
-from agents.prompt_executor import StubExecutor
+from agents.prompt_executor import PromptExecutor
 
-def test_stub_executor_returns_expected():
-    executor = StubExecutor()
-    resp = executor.execute("researcher", "Do something about AAPL", {"ticker": "AAPL"})
-    assert "[researcher response]" in resp
-    assert "AAPL" in resp
+def test_prompt_executor_openai(monkeypatch):
+    exec = PromptExecutor()
+    result = exec.execute_prompt("Hello")
+    assert "OpenAIExecutor" in result
+
+def test_prompt_executor_llama(monkeypatch):
+    exec = PromptExecutor(use_local_llama=True)
+    result = exec.execute_prompt("Hello")
+    assert "LocalLlamaExecutor" in result
