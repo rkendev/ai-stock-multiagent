@@ -9,25 +9,24 @@ import typer
 
 # Try to load .env automatically if python-dotenv is available
 try:
-    from dotenv import load_dotenv, find_dotenv
+    from dotenv import load_dotenv, find_dotenv, dotenv_values
 except ImportError:
-    load_dotenv = None
-    find_dotenv = None
+    load_dotenv = find_dotenv = dotenv_values = None
 
 
 def _load_env(env_file: Optional[str] = None) -> None:
     """Load environment variables from .env (or given env_file) into os.environ."""
-    if load_dotenv is None:
+    if not load_dotenv:
         return
     if env_file:
         load_dotenv(env_file, override=False)
     else:
-        path = find_dotenv(usecwd=True)
+        path = find_dotenv(usecwd=True) if find_dotenv else None
         if path:
             load_dotenv(path, override=False)
 
 
-# Load .env at import time (so CLI commands see OPENAI_API_KEY etc.)
+# Load .env at import time
 _load_env()
 
 app = typer.Typer(help="Multi-Agent Stock CLI", no_args_is_help=True)
@@ -79,7 +78,7 @@ def ingest_fundamentals(
 @ingest_app.command("news")
 def ingest_news(
     ticker: str = typer.Option(..., "--ticker", "-t", help="Ticker symbol"),
-    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Number of items"),
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Number of news items"),
 ):
     from ingest.news import main as news_main  # type: ignore
     sys.argv = ["news.py", "--ticker", ticker, "--limit", str(limit)]
@@ -160,8 +159,17 @@ def agent_visualizer(
 
 
 # =====================================================
-# ORCHESTRATION + PROMPT V2 SUPPORT
+# ORCHESTRATION + PROMPT-V2 + LOCAL-LLAMA SUPPORT
 # =====================================================
+
+def _merge_dotenv(env: dict) -> dict:
+    """Merge .env variables into environment for subprocess calls."""
+    if find_dotenv:
+        path = find_dotenv(usecwd=True)
+        if path and dotenv_values:
+            env.update({k: v for k, v in dotenv_values(path).items() if v is not None})
+    return env
+
 
 def _call_orchestrator(
     ticker: str,
@@ -170,10 +178,12 @@ def _call_orchestrator(
     skip_news: bool,
     skip_prices: bool,
     skip_fundamentals: bool,
-    parallel_ingest: bool = False,
-    use_prompt_v2: bool = False,
+    parallel_ingest: bool,
+    use_prompt_v2: bool,
+    use_local_llama: bool,
+    model_name: Optional[str],
 ) -> None:
-    """Call orchestrator, optionally with Prompt v2 support."""
+    """Invoke orchestrator (in-process or subprocess fallback)."""
     try:
         import agents.orchestrator as orch  # type: ignore
         if use_prompt_v2 and hasattr(orch, "orchestrate_with_prompt_flow"):
@@ -189,12 +199,13 @@ def _call_orchestrator(
             skip_prices=skip_prices,
             skip_fundamentals=skip_fundamentals,
             parallel_ingest=parallel_ingest,
+            use_local_llama=use_local_llama,
         )
         return
     except ImportError:
         pass
 
-    # Fallback: subprocess invocation
+    # --- Fallback via subprocess
     cmd = [sys.executable, "src/agents/orchestrator.py", ticker]
     if since:
         cmd += ["--since", since]
@@ -202,36 +213,33 @@ def _call_orchestrator(
         cmd += ["--parallel-ingest"]
     if use_prompt_v2:
         cmd += ["--use-prompt-v2"]
+    if use_local_llama:
+        cmd += ["--use-local-llama"]
+    if model_name:
+        cmd += ["--model", model_name]
 
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     env = _merge_dotenv(env)
-    print(f"Fallback run: {' '.join(cmd)}")
+    print(f"[cli] Fallback run: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, env=env)
-
-
-def _merge_dotenv(env: dict) -> dict:
-    if find_dotenv:
-        path = find_dotenv(usecwd=True)
-        if path:
-            from dotenv import dotenv_values  # type: ignore
-            env.update({k: v for k, v in dotenv_values(path).items() if v is not None})
-    return env
 
 
 @app.command("run")
 def run_pipeline(
     ticker: str = typer.Argument(..., help="Ticker symbol"),
     since_arg: Optional[str] = typer.Argument(None, help="Optional since date"),
-    since_opt: Optional[str] = typer.Option(None, "--since", "-s", help="Since (YYYY-MM-DD)"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Limit on news/sentiment"),
+    since_opt: Optional[str] = typer.Option(None, "--since", "-s", help="Since date"),
+    limit: int = typer.Option(20, "--limit", "-n", help="News limit"),
     skip_news: bool = typer.Option(False, "--skip-news", help="Skip news ingestion"),
     skip_prices: bool = typer.Option(False, "--skip-prices", help="Skip price ingestion"),
     skip_fundamentals: bool = typer.Option(False, "--skip-fundamentals", help="Skip fundamentals ingestion"),
-    parallel: bool = typer.Option(False, "--parallel-ingest", "-p", help="Run ingestion in parallel"),
-    use_prompt_v2: bool = typer.Option(False, "--use-prompt-v2", help="Enable new Prompt v2 orchestrator flow"),
+    parallel: bool = typer.Option(False, "--parallel-ingest", "-p", help="Parallel ingestion"),
+    use_prompt_v2: bool = typer.Option(False, "--use-prompt-v2", help="Enable prompt-based workflow"),
+    use_local_llama: bool = typer.Option(False, "--use-local-llama", help="Use local LLaMA backend for prompt execution"),
+    model: Optional[str] = typer.Option(None, "--model", help="Model name for LLM backend"),
 ):
-    """Run full pipeline: ingest → analyze → reporter, optionally with Prompt v2."""
+    """Main entrypoint for full pipeline orchestration."""
     since = since_opt or since_arg
     _call_orchestrator(
         ticker=ticker,
@@ -242,6 +250,8 @@ def run_pipeline(
         skip_fundamentals=skip_fundamentals,
         parallel_ingest=parallel,
         use_prompt_v2=use_prompt_v2,
+        use_local_llama=use_local_llama,
+        model_name=model,
     )
 
 
