@@ -1,10 +1,10 @@
-🧠 AI Stock Multi-Agent
+# AI Stock Multi-Agent
 
 Multi-Agent Stock Market Analyst (portfolio-ready capstone)
 
 This project orchestrates a team of modular AI agents to analyze a stock end-to-end — from data ingestion to report generation. It demonstrates modern AI orchestration, data pipelines, and LLM integration using OpenAI and local LLaMA backends.
 
-🔍 Overview
+# Overview
 
 The pipeline:
 
@@ -24,7 +24,7 @@ Parallel ingestion for faster data retrieval.
 
 Visualization agent to embed charts in reports.
 
-📂 Architecture
+# Architecture
 ingest/
  ├── prices.py        → data/<TICKER>/prices.parquet
  ├── fundamentals.py  → data/<TICKER>/fundamentals.csv
@@ -46,7 +46,7 @@ orchestrator modes:
   - parallel ingest (`--parallel-ingest`)
   - prompt-v2 orchestrated LLM flow
 
-⚙️ Requirements
+# Requirements
 
 Python 3.10+ or Docker
 
@@ -56,7 +56,7 @@ OpenAI API key (for cloud LLMs)
 
 Local LLaMA optional backend (--use-local-llama)
 
-🚀 Quick Start (Local)
+# Quick Start (Local)
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -68,7 +68,7 @@ PYTHONPATH=src pytest -q
 # Run full pipeline
 PYTHONPATH=src python -m cli run AAPL 2024-06-01
 
-🧩 New CLI Features
+# New CLI Features
 # Help
 PYTHONPATH=src python -m cli --help
 
@@ -84,7 +84,7 @@ PYTHONPATH=src python -m cli run AAPL 2024-06-01 --use-prompt-v2 --local-llama
 # Enable parallel ingestion for speed
 PYTHONPATH=src python -m cli run AAPL 2024-06-01 --parallel-ingest
 
-🧠 Prompt-v2 and Local LLaMA
+# Prompt-v2 and Local LLaMA
 
 PromptManager defines reusable templates for agents.
 
@@ -98,7 +98,7 @@ from agents.prompt_executor import PromptExecutor
 executor = PromptExecutor(use_local_llama=True)
 print(executor.execute_prompt("Summarize TSLA outlook"))
 
-📊 Visualization Agent
+# Visualization Agent
 
 Adds plots (price trends, sentiment over time) to the final report.
 
@@ -109,15 +109,14 @@ Outputs charts to:
 
 output/<TICKER>/charts/
 
-🧪 Testing
+# Testing
 # Unit tests
 PYTHONPATH=src pytest -q -m "not integration"
 
 # Full test suite
 PYTHONPATH=src pytest -q
 
-🗺 Roadmap (Next Steps)
-
+# Roadmap (Next Steps)
 Plugin API for custom agents
 
 Real local LLaMA integration (llama-cpp / HuggingFace)
@@ -128,6 +127,5 @@ Dashboard (Streamlit / FastAPI)
 
 Caching + retry logic for robustness
 
-📜 License
-
+# License
 MIT © 2025 rkendev
