@@ -25,7 +25,6 @@ class LocalLlamaExecutor:
     temperature: float = 0.1
 
     def execute_prompt(self, prompt: str, context: Optional[Dict] = None) -> str:
-        # Stubbed for tests: include class name for assertion
         return f"LocalLlamaExecutor: {prompt}"
 
 

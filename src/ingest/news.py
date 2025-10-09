@@ -7,22 +7,19 @@ from datetime import datetime
 import feedparser
 
 def fetch_rss_news(ticker: str, limit: int = 20):
-    """
-    Fetch latest articles from Yahoo Finance RSS for a ticker.
-    Returns a list of dicts with keys: title, link, published, summary.
-    """
+    import feedparser
     url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
     feed = feedparser.parse(url)
-    entries = feed.entries[:limit]
-    news_items = []
-    for e in entries:
-        news_items.append({
-            "title":     e.get("title", ""),
-            "link":      e.get("link", ""),
-            "published": e.get("published", ""),
-            "summary":   e.get("summary", "")
+    items = []
+    for e in feed.entries[:limit]:
+        items.append({
+            "title": getattr(e, "title", ""),
+            "link": getattr(e, "link", ""),
+            "published": getattr(e, "published", ""),
+            "summary": getattr(e, "summary", "")
         })
-    return news_items
+    return items
+
 
 def main():
     p = argparse.ArgumentParser(description="Download RSS news for a ticker")

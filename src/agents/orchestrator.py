@@ -98,7 +98,8 @@ def orchestrate(
     run_cmd(f"src/agents/sentiment.py --ticker {ticker} --limit {news_limit}")
     run_cmd(f"src/agents/fundamental.py --ticker {ticker}")
     run_cmd(f"src/agents/technical.py --ticker {ticker}")
-    run_cmd(f"src/agents/reporter.py --ticker {ticker}")
+    run_cmd(f"python -m reporter.report_generator --ticker {ticker}")
+
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     print(f"[orchestrator] Completed {ticker} at {ts}", flush=True)
@@ -170,7 +171,8 @@ def orchestrate_with_prompt_flow(
     run_cmd(f"src/agents/sentiment.py --ticker {ticker} --limit {news_limit}")
     run_cmd(f"src/agents/fundamental.py --ticker {ticker}")
     run_cmd(f"src/agents/technical.py --ticker {ticker}")
-    run_cmd(f"src/agents/reporter.py --ticker {ticker}")
+    run_cmd(f"{sys.executable} -m reporter.report_generator --ticker {ticker}")
+
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     print(f"[orchestrator:prompt-v2] Completed {ticker} at {ts}", flush=True)

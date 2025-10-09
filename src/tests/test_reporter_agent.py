@@ -1,52 +1,71 @@
 # src/tests/test_reporter_agent.py
+from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
-import pytest
+import pandas as pd
 
-from agents.reporter import ReporterAgent, BaseReporter
+from reporter import report_generator as rg
 
-class DummyReporter(BaseReporter):
-    def __init__(self):
-        # Skip OpenAI key requirement
-        self.api_key = "DUMMY"
-    def generate_report(self, context: dict) -> str:
-        # ensure all keys present
-        assert set(context.keys()) == {"fundamental","technical","sentiment","researcher"}
-        # return a simple confirmation string
-        return "## Dummy Report\nAll agents present."
 
-@pytest.fixture(autouse=True)
-def isolate_output(tmp_path, monkeypatch):
-    # Redirect all output/ reads to a fresh tmp_path / data structure
-    out = tmp_path / "output"
-    monkeypatch.setenv("OUTPUT_ROOT", str(out))
-    return out
+def _write_minimal_prices(parquet_path: Path) -> None:
+    """Create a tiny Parquet file with a DatetimeIndex and a Close column."""
+    dates = pd.date_range("2025-09-15", periods=10, freq="B")
+    close = pd.Series([100 + i for i in range(len(dates))], index=dates, name="Close")
+    df = pd.DataFrame({"Close": close})
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(parquet_path)
 
-def write_json(dirpath: Path, filename: str, data):
-    dirpath.mkdir(parents=True, exist_ok=True)
-    with open(dirpath / filename, "w", encoding="utf8") as f:
-        json.dump(data, f)
 
-def test_reporter_end_to_end(isolate_output):
-    out_root = isolate_output
-    ticker = "T"
+def _write_minimal_technical(json_path: Path, asof: str) -> None:
+    """Create a minimal technical.json with signals expected by the reporter."""
+    payload = {
+        "ticker": "TEST",
+        "asof": asof,
+        "indicators": {
+            "MA20": [],
+            "MA50": [],
+            "MA200": [],
+            "RSI14": [],
+            "volatility_20d": [],
+        },
+        "signals": {
+            "above_MA50": True,
+            "above_MA200": True,
+            "overbought": False,
+            "oversold": False,
+            "rally_volatility_high": False,
+        },
+    }
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(json.dumps(payload, indent=2))
 
-    # Prepare fake outputs for each agent
-    write_json(out_root / "fundamental" / ticker, "f.json",   {"ticker": ticker})
-    write_json(out_root / "technical" / ticker,   "t.json",   {"ticker": ticker})
-    write_json(out_root / "sentiment" / ticker,   "s.json",   [{"title":"X"}])
-    write_json(out_root / "researcher" / ticker,  "r.json",   [{"title":"Y"}])
 
-    # Run reporter with dummy
-    agent = ReporterAgent(DummyReporter())
-    report_path = agent.run(ticker)
+def test_report_generator_end_to_end(tmp_path: Path) -> None:
+    ticker = "ASML.AS"  # any symbol is fine; paths are synthetic here
 
-    # Verify output file exists and contents match dummy
-    txt = Path(report_path).read_text()
-    assert txt.startswith("## Dummy Report")
+    # Arrange: create data/<ticker>/{prices.parquet, technical.json}
+    data_dir = tmp_path / "data" / ticker
+    prices_path = data_dir / "prices.parquet"
+    _write_minimal_prices(prices_path)
 
-    # Also ensure it's under OUTPUT_ROOT/reporter/<ticker>
-    assert Path(report_path).parents[1].name == ticker
+    # Use the last date in prices as the asof
+    asof = pd.read_parquet(prices_path).index[-1].date().isoformat()
+    tech_path = data_dir / "technical.json"
+    _write_minimal_technical(tech_path, asof)
+
+    # Act: load inputs, build technical section, write markdown report
+    prices = rg._load_prices(prices_path)
+    tech = rg._load_technical(tech_path)
+    technical_md = rg._mk_technical_summary(ticker, tech.get("asof", asof), tech, prices)
+
+    out_dir = tmp_path / "output" / ticker
+    report_path = rg._write_report_md(ticker, out_dir, {"technical": technical_md})
+
+    # Assert: report exists and contains expected sections/phrases
+    assert report_path.exists(), "report.md was not created"
+    text = report_path.read_text()
+    assert text.startswith(f"# {ticker} — MVP Technical Report")
+    assert "**ASML Technical Snapshot**" in text or "**ASML Technical Snapshot**".replace("ASML", ticker.split(".")[0]) in text
+    assert "Overall bias" in text or "Overall bias" in text.replace("**", "")

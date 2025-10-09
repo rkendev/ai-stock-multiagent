@@ -30,13 +30,14 @@ def test_orchestrate_parallel_runs_ingest_tasks(parallel, tmp_path):
         calls = mocked_run_cmd.call_args_list
         called_cmds = [c[0][0] for c in calls]  # first arg of each call
 
-        assert any("prices.py" in cmd for cmd in called_cmds)
-        assert any("fundamentals.py" in cmd for cmd in called_cmds)
-        assert any("news.py" in cmd for cmd in called_cmds)
-        assert any("reporter.py" in cmd for cmd in called_cmds)
+        assert any("prices" in cmd for cmd in called_cmds)
+        assert any("fundamentals" in cmd for cmd in called_cmds)
+        assert any("news" in cmd for cmd in called_cmds)
+        assert any("reporter" in cmd for cmd in called_cmds)
 
         # Reporter should be last call (or at least exist)
-        assert "reporter.py" in called_cmds[-1]
+        assert any("reporter" in cmd for cmd in called_cmds[-1:])
+
 
         # If parallel, ingest commands may appear in any order
         if parallel:
