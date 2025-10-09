@@ -60,11 +60,17 @@ def compute_indicators(df: pd.DataFrame, cfg: TechnicalConfig) -> pd.DataFrame:
 def make_signals(df: pd.DataFrame, cfg: TechnicalConfig) -> Dict[str, bool]:
     latest = df.iloc[-1]
     signals = {
-        "above_MA50": bool(latest["Close"] > latest["MA50"]) if "MA50" in latest else False,
-        "above_MA200": bool(latest["Close"] > latest["MA200"]) if "MA200" in latest else False,
-        "overbought": bool(latest[f"RSI{cfg.rsi_period}"] > 70),
-        "oversold": bool(latest[f"RSI{cfg.rsi_period}"] < 30),
-        "rally_volatility_high": bool(latest[f"VOL{cfg.vol_window}"] > df[f"VOL{cfg.vol_window}"].median()),
+        "above_MA50": bool(latest.get("Close", np.nan) > latest.get("MA50", np.nan))
+        if "MA50" in df.columns else False,
+        "above_MA200": bool(latest.get("Close", np.nan) > latest.get("MA200", np.nan))
+        if "MA200" in df.columns else False,
+        "overbought": bool(latest.get(f"RSI{cfg.rsi_period}", 50) > 70),
+        "oversold": bool(latest.get(f"RSI{cfg.rsi_period}", 50) < 30),
+        "rally_volatility_high": bool(
+            latest.get(f"VOL{cfg.vol_window}", 0)
+            > df[f"VOL{cfg.vol_window}"].median()
+        )
+        if f"VOL{cfg.vol_window}" in df.columns else False,
     }
     return signals
 
@@ -88,14 +94,13 @@ def dump_json(ticker: str, df_ind: pd.DataFrame, cfg: TechnicalConfig, out_path:
         json.dump(payload, f, indent=2)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="Compute technical indicators & signals from prices.parquet")
-    ap.add_argument("--ticker", required=True, help="Ticker (directory under data/)")
-    ap.add_argument("--data-dir", default="data", help="Input root (expects data/<ticker>/prices.parquet)")
-    ap.add_argument("--out-dir", default="data", help="Output root (writes data/<ticker>/technical.json by default)")
-    args = ap.parse_args()
-
-    parquet_path = Path(args.data_dir) / args.ticker / "prices.parquet"
+def run_technical(ticker: str, data_dir: str = "data", out_dir: str = "data") -> Path:
+    """
+    Test-friendly entrypoint. Loads data/<ticker>/prices.parquet,
+    computes indicators & signals, writes data/<ticker>/technical.json,
+    and returns the written path.
+    """
+    parquet_path = Path(data_dir) / ticker / "prices.parquet"
     if not parquet_path.exists():
         raise FileNotFoundError(f"Missing: {parquet_path}")
 
@@ -103,8 +108,19 @@ def main() -> None:
     cfg = TechnicalConfig()
     df_ind = compute_indicators(df, cfg)
 
-    out_json = Path(args.out_dir) / args.ticker / "technical.json"
-    dump_json(args.ticker, df_ind, cfg, out_json)
+    out_json = Path(out_dir) / ticker / "technical.json"
+    dump_json(ticker, df_ind, cfg, out_json)
+    return out_json
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Compute technical indicators & signals from prices.parquet")
+    ap.add_argument("--ticker", required=True, help="Ticker (directory under data/)")
+    ap.add_argument("--data-dir", default="data", help="Input root (expects data/<ticker>/prices.parquet)")
+    ap.add_argument("--out-dir", default="data", help="Output root (writes data/<ticker>/technical.json)")
+    args = ap.parse_args()
+
+    out_json = run_technical(args.ticker, data_dir=args.data_dir, out_dir=args.out_dir)
     print(f"Wrote {out_json}")
 
 
