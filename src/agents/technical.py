@@ -5,18 +5,20 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
+# Module-level defaults so tests can monkeypatch these
+DATA_DIR = "data"
+OUT_DIR = "data"
+
 
 def _load_prices(parquet_path: Path) -> pd.DataFrame:
     df = pd.read_parquet(parquet_path)
-    # Keep sorted index if datetime
     if isinstance(df.index, pd.DatetimeIndex):
         df = df.sort_index()
-    # Flatten columns if MultiIndex
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     if "Close" not in df.columns:
@@ -25,7 +27,6 @@ def _load_prices(parquet_path: Path) -> pd.DataFrame:
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    # Wilder's RSI
     delta = series.diff()
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
@@ -94,12 +95,19 @@ def dump_json(ticker: str, df_ind: pd.DataFrame, cfg: TechnicalConfig, out_path:
         json.dump(payload, f, indent=2)
 
 
-def run_technical(ticker: str, data_dir: str = "data", out_dir: str = "data") -> Path:
+def run_technical(
+    ticker: str,
+    data_dir: Optional[str] = None,
+    out_dir: Optional[str] = None
+) -> Dict[str, object]:
     """
-    Test-friendly entrypoint. Loads data/<ticker>/prices.parquet,
-    computes indicators & signals, writes data/<ticker>/technical.json,
-    and returns the written path.
+    Loads <data_dir>/<ticker>/prices.parquet, computes indicators & signals,
+    writes <out_dir>/<ticker>/technical.json, and returns a small summary dict
+    the tests expect: {'rsi': float, 'ma50': float, 'overbought': bool, 'path': str}
     """
+    data_dir = data_dir or DATA_DIR
+    out_dir = out_dir or OUT_DIR
+
     parquet_path = Path(data_dir) / ticker / "prices.parquet"
     if not parquet_path.exists():
         raise FileNotFoundError(f"Missing: {parquet_path}")
@@ -110,18 +118,23 @@ def run_technical(ticker: str, data_dir: str = "data", out_dir: str = "data") ->
 
     out_json = Path(out_dir) / ticker / "technical.json"
     dump_json(ticker, df_ind, cfg, out_json)
-    return out_json
+
+    latest = df_ind.iloc[-1]
+    rsi_val = float(latest.get("RSI14", 50.0))
+    ma50_val = float(latest.get("MA50", latest["Close"]))
+    overbought = bool(rsi_val > 70.0)
+    return {"rsi": rsi_val, "ma50": ma50_val, "overbought": overbought, "path": str(out_json)}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Compute technical indicators & signals from prices.parquet")
     ap.add_argument("--ticker", required=True, help="Ticker (directory under data/)")
-    ap.add_argument("--data-dir", default="data", help="Input root (expects data/<ticker>/prices.parquet)")
-    ap.add_argument("--out-dir", default="data", help="Output root (writes data/<ticker>/technical.json)")
+    ap.add_argument("--data-dir", default=None, help="Input root (defaults to module DATA_DIR)")
+    ap.add_argument("--out-dir", default=None, help="Output root (defaults to module OUT_DIR)")
     args = ap.parse_args()
 
-    out_json = run_technical(args.ticker, data_dir=args.data_dir, out_dir=args.out_dir)
-    print(f"Wrote {out_json}")
+    res = run_technical(args.ticker, data_dir=args.data_dir, out_dir=args.out_dir)
+    print(f"Wrote {res['path']}")
 
 
 if __name__ == "__main__":

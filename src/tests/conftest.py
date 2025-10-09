@@ -3,6 +3,9 @@ import pandas as pd
 import pytest
 
 from ingest.prices import fetch_prices
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
 
 @pytest.mark.unit
 @pytest.mark.parametrize("ticker,since", [

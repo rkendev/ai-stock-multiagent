@@ -171,7 +171,7 @@ def orchestrate_with_prompt_flow(
     run_cmd(f"src/agents/sentiment.py --ticker {ticker} --limit {news_limit}")
     run_cmd(f"src/agents/fundamental.py --ticker {ticker}")
     run_cmd(f"src/agents/technical.py --ticker {ticker}")
-    subprocess.run([sys.executable, "-m", "reporter.report_generator", "--ticker", ticker], check=True)
+    run_cmd(f"{sys.executable} -m reporter.report_generator --ticker {ticker}")
 
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
