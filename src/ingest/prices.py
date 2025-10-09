@@ -6,7 +6,7 @@ import yfinance as yf
 import pandas as pd
 
 def fetch_prices(ticker: str, since: str) -> pd.DataFrame:
-    df = yf.download(ticker, start=since, progress=False)
+    df = yf.download(ticker, start=since, progress=False, auto_adjust=True)
     return df
 
 def main():
@@ -17,11 +17,10 @@ def main():
 
     out_dir = os.path.join("data", args.ticker)
     os.makedirs(out_dir, exist_ok=True)
-
-    df = fetch_prices(args.ticker, args.since)
     out_path = os.path.join(out_dir, "prices.parquet")
+    df = fetch_prices(args.ticker, args.since)
     df.to_parquet(out_path)
-    print(f"Wrote {len(df)} rows to {out_path}")
+    print(f"Wrote {out_path}")
 
 if __name__ == "__main__":
     main()

@@ -54,3 +54,13 @@ Thumbs.db
 
 # Misc
 *.so           # compiled shared objects (if any C extensions)
+
+# miscallaneous
+.env
+patch-orchestrator.diff
+patch-reporter.diff
+project_blueprint.tsv
+seed_project.sh
+seed_with_labels.sh
+tools/
+

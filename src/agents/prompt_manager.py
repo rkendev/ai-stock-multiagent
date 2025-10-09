@@ -10,13 +10,15 @@ class PromptManager:
     """
     def __init__(self):
         # You can expand or externalize this later
-        self.templates: Dict[str, str] = {
-            "researcher": "Research {ticker} since {since}. Focus on {topic}.",
-            "sentiment": "Analyze recent news for {ticker}. Rate sentiment.",
-            "fundamental": "Provide key fundamental metrics for {ticker}.",
-            "reporter": "Write a report for {ticker} with findings."
+        self.templates = {
+            "researcher": "Research {ticker} since {since}",
+            "reporter": (
+                "Summarize findings for {ticker}.\n"
+                "Technical: {technical}\nFundamental: {fundamental}\n"
+                "Sentiment: {sentiment}\nResearch: {researcher}"
+            ),
         }
-
+       
     def render(self, agent: str, **kwargs: Any) -> str:
         template = self.templates.get(agent)
         if template is None:
