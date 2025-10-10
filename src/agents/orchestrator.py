@@ -169,7 +169,10 @@ def orchestrate_with_prompt_flow(
     # For compatibility with tests, still invoke agent scripts (as STRINGS).
     run_cmd(f"src/agents/researcher.py --ticker {ticker} --limit {news_limit}")
     run_cmd(f"src/agents/sentiment.py --ticker {ticker} --limit {news_limit}")
-    run_cmd(f"src/agents/fundamental.py --ticker {ticker}")
+    # inside orchestrate(...) or your main flow, after prices ingest:
+    run_cmd(f"{sys.executable} -m ingest.fundamentals --ticker {ticker} --out-root data")
+    # run fundamental agent to produce JSON signals
+    run_cmd(f"{sys.executable} -m agents.fundamental --ticker {ticker} --data-dir data --out-dir data")
     run_cmd(f"src/agents/technical.py --ticker {ticker}")
     run_cmd(f"{sys.executable} -m reporter.report_generator --ticker {ticker}")
 

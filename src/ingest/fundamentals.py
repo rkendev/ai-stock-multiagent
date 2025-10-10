@@ -1,28 +1,45 @@
 # src/ingest/fundamentals.py
-import argparse
-import os
+from __future__ import annotations
 
-import yfinance as yf
+import argparse
+from pathlib import Path
 import pandas as pd
+import yfinance as yf
+
 
 def fetch_fundamentals(ticker: str) -> pd.DataFrame:
-    # Pull quarterly financials (income statement, balance sheet, cashflow)
-    tk = yf.Ticker(ticker)
-    df = tk.quarterly_financials.T  # transpose for date-based index
-    return df
+    t = yf.Ticker(ticker)
+    try:
+        stmt = t.income_stmt
+        if stmt is None or stmt.empty:
+            return pd.DataFrame(columns=["Date", "Revenue", "Earnings"])
+        df = stmt.T.reset_index().rename(columns={"index": "Date"})
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df[["Date", "Total Revenue", "Net Income"]].rename(
+            columns={"Total Revenue": "Revenue", "Net Income": "Earnings"}
+        )
+        return df.dropna(subset=["Date"])
+    except Exception:
+        return pd.DataFrame(columns=["Date", "Revenue", "Earnings"])
 
-def main():
-    p = argparse.ArgumentParser(description="Download quarterly fundamentals for a ticker")
-    p.add_argument("--ticker", required=True, help="Stock ticker symbol")
+
+def write_parquet_fundamentals(ticker: str, out_root: str = "data") -> str:
+    df = fetch_fundamentals(ticker)
+    out_dir = Path(out_root) / ticker
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "fundamentals.parquet"
+    df.to_parquet(out_path)
+    return str(out_path)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description="Fetch & write quarterly fundamentals parquet")
+    p.add_argument("--ticker", required=True)
+    p.add_argument("--out-root", default="data")
     args = p.parse_args()
+    out = write_parquet_fundamentals(args.ticker, out_root=args.out_root)
+    print(f"Wrote {out}")
 
-    out_dir = os.path.join("data", args.ticker)
-    os.makedirs(out_dir, exist_ok=True)
-
-    df = fetch_fundamentals(args.ticker)
-    out_path = os.path.join(out_dir, "fundamentals.csv")
-    df.to_csv(out_path)
-    print(f"Wrote {df.shape[0]} quarters × {df.shape[1]} metrics to {out_path}")
 
 if __name__ == "__main__":
     main()

@@ -1,10 +1,13 @@
 # src/tests/test_fundamental_agent.py
-import json
+from __future__ import annotations
+import os
 from pathlib import Path
-
+import json
+import pandas as pd
 import pytest
 
 from agents.fundamental import run_fundamental
+
 
 @pytest.mark.parametrize("ticker", ["AAPL"])
 def test_run_fundamental(tmp_path, ticker):
@@ -30,3 +33,22 @@ def test_run_fundamental(tmp_path, ticker):
     res = run_fundamental(ticker)
     assert res["revenue_growth"] == pytest.approx((140 - 100) / 100)
     assert res["rating"] == "Strong"
+
+
+def test_run_fundamental_creates_json(tmp_path: Path):
+    ticker = "TEST"
+    data_dir = tmp_path / "data" / ticker
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # minimal parquet with 5 quarters
+    dates = pd.date_range("2023-01-01", periods=5, freq="Q")
+    df = pd.DataFrame({"Date": dates, "Revenue": [10,12,13,15,16], "Earnings":[2,2.5,3,3.2,3.5]})
+    df.to_parquet(data_dir / "fundamentals.parquet")
+
+    res = run_fundamental(ticker, data_dir=str(tmp_path / "data"), out_dir=str(tmp_path / "data"))
+    out = Path(res["path"])
+    assert out.exists()
+    j = json.loads(out.read_text())
+    assert j["ticker"] == ticker
+    assert "signals" in j
+
