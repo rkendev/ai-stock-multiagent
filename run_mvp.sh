@@ -9,6 +9,9 @@ python -m cli --ticker "$TICKER" --since "$SINCE"
 python -m agents.technical --ticker "$TICKER" --data-dir data --out-dir data
 python -m agents.visualizer --ticker "$TICKER" --data-dir data --out-dir output
 python -m reporter.report_generator --ticker "$TICKER" --data-dir data --out-dir output
+python -m ingest.news --ticker "$TICKER" --out-root output --limit 10
+python -m agents.sentiment --ticker "$TICKER" --news-root output/news --out-root output/sentiment
+
 
 echo
 echo "Artifacts:"

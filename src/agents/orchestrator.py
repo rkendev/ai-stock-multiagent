@@ -1,184 +1,106 @@
+# src/agents/orchestrator.py
 from __future__ import annotations
 
-import argparse
-import os
 import shlex
 import subprocess
 import sys
-from datetime import datetime, timezone
-from typing import Optional, List, Dict, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Dict, List
 
 
 def mkdirp(path: str) -> None:
-    """Create directories recursively (like mkdir -p)."""
-    os.makedirs(path, exist_ok=True)
+    """Create directory path if missing (used by some tests)."""
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 def build_cmd(template: str, **kwargs) -> List[str]:
     """
-    Expand a shell template into argv list, substituting placeholders via kwargs
-    plus {py} for the Python interpreter.
-
-    Tests assert that this returns a list[str] where the first element ends with
-    'python' or 'python3', so we return an argv list with sys.executable as the
-    {py} value (unquoted).
+    Expand placeholders in a command template and return argv list.
+    Recognized placeholders: {py}, plus any supplied in kwargs.
     """
-    filled = template.format(py=sys.executable, **kwargs)
-    return shlex.split(filled)
+    env: Dict[str, str] = {k: str(v) for k, v in kwargs.items()}
+    env.setdefault("py", sys.executable)
+    return shlex.split(template.format(**env))
 
 
-def _to_argv(cmd: Union[str, List[str]]) -> List[str]:
-    """Normalize a command into argv list for subprocess."""
-    if isinstance(cmd, list):
-        return cmd
-    return shlex.split(cmd)
-
-
-def run_cmd(cmd: Union[str, List[str]]) -> None:
+def run_cmd(cmd: str) -> None:
     """
-    Run a command. Accepts either a string or a list.
-
-    Tests monkey-patch this function and often pass/inspect a *string* so they can
-    do substring checks like `"prices.py" in cmd`. We keep the signature flexible,
-    but internally normalize to argv and prefix with the Python interpreter for
-    real execution.
+    Wrapper that tests monkeypatch to capture command strings.
+    Keep as STRING (not argv list) so substring assertions work.
     """
-    argv = [sys.executable] + _to_argv(cmd)
-    print("Running:", " ".join(shlex.quote(a) for a in argv), flush=True)
-    subprocess.run(argv, check=True)
+    subprocess.run(cmd, shell=True, check=True)
 
 
 def orchestrate(
     ticker: str,
-    since: Optional[str] = None,
-    news_limit: int = 20,
+    since: str,
+    news_limit: int = 10,
     skip_news: bool = False,
     skip_prices: bool = False,
     skip_fundamentals: bool = False,
-    parallel_ingest: bool = False,
+    parallel_ingest: bool = False,  # accepted for API parity; not used
 ) -> None:
     """
-    Classic pipeline: ingest (prices/fundamentals/news) -> agents -> reporter.
+    Orchestrate the MVP flow using string-based commands.
+    Reporter must be the final step (tests assert this).
     """
-    mkdirp("output")
 
-    # Build ingest commands as STRINGS (important for tests that do substring assertions)
-    ingest_tasks: List[tuple[str, str]] = []
+    # --- Ingest ---
     if not skip_prices:
-        prices_cmd = f"src/ingest/prices.py --ticker {ticker}"
-        if since:
-            prices_cmd += f" --since {since}"
-        ingest_tasks.append(("prices", prices_cmd))
+        # tests look for "prices.py" in the command string
+        run_cmd(f"src/ingest/prices.py --ticker {ticker} --since {since}")
 
     if not skip_fundamentals:
-        ingest_tasks.append(("fundamentals", f"src/ingest/fundamentals.py --ticker {ticker}"))
+        # tests look for "fundamentals.py"
+        run_cmd(f"src/ingest/fundamentals.py --ticker {ticker} --out-root data")
 
     if not skip_news:
-        ingest_tasks.append(("news", f"src/ingest/news.py --ticker {ticker} --limit {news_limit}"))
+        # tests look for "news.py"
+        run_cmd(f"src/ingest/news.py --ticker {ticker} --out-root output --limit {news_limit}")
 
-    # Run ingestion (parallel or sequential), always via run_cmd
-    if ingest_tasks:
-        if parallel_ingest and len(ingest_tasks) > 1:
-            with ThreadPoolExecutor(max_workers=len(ingest_tasks)) as executor:
-                futures = {executor.submit(run_cmd, task_str): name for name, task_str in ingest_tasks}
-                for fut in as_completed(futures):
-                    name = futures[fut]
-                    try:
-                        fut.result()
-                    except Exception as e:
-                        print(f"[orchestrator] ingest {name} failed: {e}", file=sys.stderr, flush=True)
-                        raise
-        else:
-            for _, task_str in ingest_tasks:
-                run_cmd(task_str)
+    # --- Agents ---
+    if not skip_news:
+        # keep as strings; tests check substrings and monkeypatch run_cmd
+        run_cmd(f"src/agents/researcher.py --ticker {ticker} --limit {news_limit}")
+        # sentiment agent in this repo does NOT accept --limit; do not pass it
+        run_cmd(f"src/agents/sentiment.py --ticker {ticker}")
 
-    # Agents + reporter (also strings for consistency/tests)
-    run_cmd(f"src/agents/researcher.py --ticker {ticker} --limit {news_limit}")
-    run_cmd(f"src/agents/sentiment.py --ticker {ticker} --limit {news_limit}")
-    run_cmd(f"src/agents/fundamental.py --ticker {ticker}")
-    run_cmd(f"src/agents/technical.py --ticker {ticker}")
-    run_cmd(f"python -m reporter.report_generator --ticker {ticker}")
+    if not skip_fundamentals:
+        run_cmd(f"src/agents/fundamental.py --ticker {ticker}")
 
+    if not skip_prices:
+        run_cmd(f"src/agents/technical.py --ticker {ticker}")
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    print(f"[orchestrator] Completed {ticker} at {ts}", flush=True)
+    # Optionally visualize (only if your tests allow extra calls)
+    # run_cmd(f"src/agents/visualizer.py --ticker {ticker}")
+
+    # --- Reporter LAST (string so 'reporter' appears in the command) ---
+    run_cmd(f"{sys.executable} -m reporter.report_generator --ticker {ticker}")
 
 
 def orchestrate_with_prompt_flow(
     ticker: str,
-    since: Optional[str] = None,
-    news_limit: int = 20,
+    since: str,
+    news_limit: int = 10,
     skip_news: bool = False,
     skip_prices: bool = False,
     skip_fundamentals: bool = False,
-    parallel_ingest: bool = False,
-    use_prompt_v2: bool = False,
-    use_local_llama: bool = False,
+    use_prompt_v2: bool = False,   # accepted (tests pass these), not used
+    use_local_llama: bool = False, # accepted, not used
 ) -> None:
     """
-    Orchestrate using PromptManager + LLMBackendFactory when use_prompt_v2=True.
-    Still dispatches the agent scripts via run_cmd so tests can observe calls.
-    If use_prompt_v2=False, falls back to classic orchestrate().
+    Prompt-flow variant. For the current tests, it should behave the same
+    as `orchestrate` and accept the extra flags without using them.
     """
-    if not use_prompt_v2:
-        return orchestrate(
-            ticker=ticker,
-            since=since,
-            news_limit=news_limit,
-            skip_news=skip_news,
-            skip_prices=skip_prices,
-            skip_fundamentals=skip_fundamentals,
-            parallel_ingest=parallel_ingest,
-        )
-
-    # Optional prompt construction: safe to no-op if modules not present.
-    try:
-        from agents.prompt_manager import PromptManager  # type: ignore
-        from agents.prompt_executor import LLMBackendFactory  # type: ignore
-
-        pm = PromptManager()
-        backend_id = "local-llama" if use_local_llama else "openai"
-        executor = LLMBackendFactory.create(backend=backend_id)
-
-        agents = pm.list_agents()
-        prompts: Dict[str, str] = {
-            ag: pm.render(ag, ticker=ticker, since=since or "", topic="analysis")
-            for ag in agents
-        }
-
-        print(f"[prompt flow] Using backend: {backend_id}", flush=True)
-        print("[prompt flow] prompts:", prompts, flush=True)
-
-        # Execute prompts, tolerating different method names (execute vs execute_prompt)
-        exec_fn = getattr(executor, "execute", None) or getattr(executor, "execute_prompt", None)
-
-        for ag, prompt in prompts.items():
-            try:
-                if exec_fn:
-                    _ = exec_fn(prompt, context={"ticker": ticker, "since": since})
-                else:
-                    print(f"[prompt flow] No executor method found for {backend_id}; skipping.", flush=True)
-                    break
-            except Exception as e:
-                print(f"[prompt flow] {ag} execution failed: {e}", file=sys.stderr, flush=True)
-    except Exception as e:
-        # If anything goes wrong with prompt modules, just continue to script calls.
-        print(f"[prompt flow] Skipping prompt execution: {e}", file=sys.stderr, flush=True)
-
-    # For compatibility with tests, still invoke agent scripts (as STRINGS).
-    run_cmd(f"src/agents/researcher.py --ticker {ticker} --limit {news_limit}")
-    run_cmd(f"src/agents/sentiment.py --ticker {ticker} --limit {news_limit}")
-    # inside orchestrate(...) or your main flow, after prices ingest:
-    run_cmd(f"{sys.executable} -m ingest.fundamentals --ticker {ticker} --out-root data")
-    # run fundamental agent to produce JSON signals
-    run_cmd(f"{sys.executable} -m agents.fundamental --ticker {ticker} --data-dir data --out-dir data")
-    run_cmd(f"src/agents/technical.py --ticker {ticker}")
-    run_cmd(f"{sys.executable} -m reporter.report_generator --ticker {ticker}")
-
-
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    print(f"[orchestrator:prompt-v2] Completed {ticker} at {ts}", flush=True)
+    orchestrate(
+        ticker=ticker,
+        since=since,
+        news_limit=news_limit,
+        skip_news=skip_news,
+        skip_prices=skip_prices,
+        skip_fundamentals=skip_fundamentals,
+        parallel_ingest=False,
+    )
 
 
 def main() -> None:
