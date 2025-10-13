@@ -1,109 +1,71 @@
-# src/agents/sentiment.py
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
-
-from ingest.news import fetch_rss_news
-
-POS = {"beat", "beats", "growth", "surge", "upgrade", "bullish", "record", "strong", "win", "wins", "profit"}
-NEG = {"miss", "cuts", "downgrade", "bearish", "slump", "weak", "loss", "lawsuit", "recall", "delay"}
+from typing import List, Dict, Any
 
 
-def _score_text(text: str) -> float:
-    t = text.lower()
-    pos = sum(1 for w in POS if w in t)
-    neg = sum(1 for w in NEG if w in t)
-    if pos == 0 and neg == 0:
-        return 0.0
-    return (pos - neg) / max(pos + neg, 1)
+def _load_jsonl(p: Path) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    if not p.exists():
+        return items
+    for line in p.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            items.append(json.loads(line))
+        except Exception:
+            pass
+    return items
 
 
-# src/agents/sentiment.py
-def _label(score: float) -> str:
-    # tests expect uppercase labels
-    if score > 0:
-        return "POSITIVE"
-    if score < 0:
-        return "NEGATIVE"
-    return "NEUTRAL"
-
-
-def _read_news_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    rows: List[Dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except Exception:
-                continue
-    return rows
-
-
-def run_sentiment(
-    ticker: str,
-    limit: int = 10,
-    news_root: Optional[str] = None,
-    out_root: Optional[str] = None,
-) -> Union[List[Dict], Tuple[str, int]]:
+def _score_summary(text: str) -> float:
     """
-    If news_root/out_root are None: return a LIST of scored items (no files).
-    If news_root/out_root are provided: write files and return (out_dir, n).
-    Each item includes: title, link, published, summary, score, sentiment.
+    Tiny heuristic scorer to keep pipeline simple. Replace in future branch with your real NLP.
     """
-    items: List[Dict]
-    if news_root:
-        news_path = Path(news_root) / ticker / "news.jsonl"
-        items = _read_news_jsonl(news_path)
-        if not items:
-            items = fetch_rss_news(ticker, limit=limit)
-    else:
-        items = fetch_rss_news(ticker, limit=limit)
-
-    scored: List[Dict] = []
-    for r in items[:limit]:
-        title = r.get("title", "")
-        score = float(_score_text(title))
-        scored.append({
-            "published": r.get("published"),
-            "title": title,
-            # accept either 'link' or 'url' from inputs; output 'link'
-            "link": r.get("link") or r.get("url"),
-            "summary": r.get("summary", ""),
-            "score": score,
-            "sentiment": _label(score),
-        })
-
-    # If no out_root given -> return list (used by test_run_sentiment)
-    if not out_root:
-        return scored
-
-    # Otherwise, write files and return (out_dir, n) (used by test_sentiment_agent)
-    out_dir = Path(out_root) / ticker
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for i, payload in enumerate(scored, start=1):
-        (out_dir / f"{i:04d}.json").write_text(json.dumps(payload, indent=2))
-    return (str(out_dir), len(scored))
+    txt = text.lower()
+    pos = sum(w in txt for w in ["beat", "surge", "up", "growth", "record", "strong"])
+    neg = sum(w in txt for w in ["miss", "fall", "down", "slow", "weak", "probe"])
+    return float(pos - neg)
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Score headlines and write sentiment JSON files.")
-    p.add_argument("--ticker", required=True)
-    p.add_argument("--limit", type=int, default=10)
-    p.add_argument("--news-root", default=None)
-    p.add_argument("--out-root", default=None)
-    args = p.parse_args()
+    ap = argparse.ArgumentParser(description="Score headlines -> JSON items")
+    ap.add_argument("--ticker", required=True)
+    ap.add_argument("--news-root", default="output/news")
+    ap.add_argument("--out-root", default="output/sentiment")
+    ap.add_argument("--limit", type=int, default=20)
+    args = ap.parse_args()
 
-    res = run_sentiment(args.ticker, limit=args.limit, news_root=args.news_root, out_root=args.out_root)
-    if isinstance(res, tuple):
-        out_dir, n = res
-        print(f"Wrote {n} sentiment files to {out_dir}")
-    else:
-        print(f"Scored {len(res)} headlines")
+    news_path = Path(args.news_root) / args.ticker / "news.jsonl"
+    items = _load_jsonl(news_path)[: args.limit]
+
+    out_dir = Path(args.out_root) / args.ticker
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    written = 0
+    for i, it in enumerate(items):
+        title = str(it.get("title", "")).strip()
+        score = _score_summary(title or str(it.get("summary", "")))
+        sentiment = "NEUTRAL"
+        if score > 0:
+            sentiment = "POSITIVE"
+        elif score < 0:
+            sentiment = "NEGATIVE"
+
+        out = {
+            "title": title,
+            "link": it.get("link") or it.get("url"),
+            "published": it.get("published"),
+            "score": score,
+            "sentiment": sentiment,
+        }
+        (out_dir / f"{i:03d}.json").write_text(json.dumps(out, ensure_ascii=False))
+        written += 1
+
+    print(f"Wrote {written} sentiment files to {out_dir}")
+
+
+if __name__ == "__main__":
+    main()

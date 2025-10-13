@@ -1,114 +1,93 @@
-# src/ingest/news.py
 from __future__ import annotations
 
 import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Iterable, List, Dict, Any, Optional
 
+
+# Optional feed reader; if absent, we write a stub entry so the pipeline keeps working
 try:
     import feedparser  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     feedparser = None
 
 
+DEFAULT_RSS = "https://news.google.com/rss/search?q={ticker}&hl=en-US&gl=US&ceid=US:en"
+
+
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _stub_headlines(ticker: str, limit: int) -> List[Dict]:
-    now = datetime.now(timezone.utc)
-    rows: List[Dict] = []
-    for i in range(limit):
-        rows.append({
-            "published": _iso(now),
-            "title": f"{ticker} sample headline #{i+1}",
-            "link": f"https://example.com/{ticker}/{i+1}",
-            "summary": f"Stub summary for {ticker} #{i+1}",
+def _parse_since(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    return datetime.strptime(s, "%Y-%m-%d")
+
+
+def _fetch_rss(ticker: str, rss_url: Optional[str]) -> List[Dict[str, Any]]:
+    if feedparser is None:
+        # Fallback stub
+        return [{
+            "title": f"{ticker} placeholder headline (feedparser not installed)",
+            "link": "",
+            "published": _iso(datetime.utcnow()),
+            "summary": "",
+        }]
+
+    url = (rss_url or DEFAULT_RSS).format(ticker=ticker)
+    feed = feedparser.parse(url)
+    items: List[Dict[str, Any]] = []
+    for e in getattr(feed, "entries", []):
+        items.append({
+            "title": getattr(e, "title", ""),
+            "link": getattr(e, "link", ""),
+            "published": getattr(e, "published", datetime.now(timezone.utc).isoformat()),
+            "summary": getattr(e, "summary", ""),
         })
-    return rows
+    return items
 
 
-def fetch_rss_news(
-    ticker: str,
-    limit: int = 10,
-    rss_urls: Optional[List[str]] = None,
-) -> List[Dict]:
-    """
-    Returns list of dicts with keys: title, link, published, summary.
-    Falls back to an offline stub if RSS is unavailable.
-    """
-    if not rss_urls or feedparser is None:
-        return _stub_headlines(ticker, limit)
-
-    items: List[Dict] = []
-    for url in rss_urls:
-        try:
-            feed = feedparser.parse(url)  # type: ignore
-        except Exception:
-            continue
-        for e in feed.get("entries", []):
-            title = e.get("title") or ""
-            link = e.get("link") or ""
-            summary = e.get("summary") or ""
-            pub = None
-            for k in ("published_parsed", "updated_parsed"):
-                tm = e.get(k)
-                if tm:
-                    try:
-                        pub = datetime(*tm[:6], tzinfo=timezone.utc)
-                        break
-                    except Exception:
-                        pass
-            if pub is None:
-                pub = datetime.now(timezone.utc)
-            items.append({
-                "published": _iso(pub),
-                "title": str(title),
-                "link": str(link),
-                "summary": str(summary),
-            })
-    items.sort(key=lambda r: r["published"], reverse=True)
-    return items[:limit] if items else _stub_headlines(ticker, limit)
-
-
-# Back-compat alias some tests import
-def fetch_headlines(ticker: str, limit: int = 10) -> List[Dict]:
-    return fetch_rss_news(ticker, limit=limit, rss_urls=None)
-
-
-def write_news_jsonl(
-    ticker: str,
-    out_root: str = "output",
-    limit: int = 10,
-    rss_urls: Optional[List[str]] = None,
-) -> str:
-    rows = fetch_rss_news(ticker, limit=limit, rss_urls=rss_urls)
-    out_dir = Path(out_root) / "news" / ticker
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "news.jsonl"
+def _write_jsonl(items: Iterable[Dict[str, Any]], out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
-    return str(out_path)
+        for it in items:
+            f.write(json.dumps(it, ensure_ascii=False) + "\n")
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Ingest headlines for a ticker (RSS or offline stub).")
-    p.add_argument("--ticker", required=True)
-    p.add_argument("--out-root", default="output")
-    p.add_argument("--limit", type=int, default=10)
-    p.add_argument("--rss-url", action="append", help="Optional RSS URL(s).")
-    args = p.parse_args()
+    ap = argparse.ArgumentParser(description="Fetch RSS news and write JSONL")
+    ap.add_argument("--ticker", required=True)
+    ap.add_argument("--out-root", default="output")
+    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--since", default=None, help="YYYY-MM-DD (optional)")
+    ap.add_argument("--rss-url", default=None, help="Override RSS URL; {ticker} will be substituted")
+    args = ap.parse_args()
 
-    path = write_news_jsonl(
-        args.ticker,
-        out_root=args.out_root,
-        limit=args.limit,
-        rss_urls=args.rss_url,
-    )
-    print(f"Wrote {path}")
+    since_dt = _parse_since(args.since)
+    items = _fetch_rss(args.ticker, args.rss_url)
+
+    # Optional since filter (by published field if it parses, otherwise keep)
+    if since_dt:
+        kept: List[Dict[str, Any]] = []
+        for it in items:
+            ts = it.get("published", "")
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", ""))
+            except Exception:
+                dt = since_dt  # keep if we can't parse
+            if dt >= since_dt:
+                kept.append(it)
+        items = kept
+
+    items = items[: args.limit]
+
+    out_dir = Path(args.out_root) / "news" / args.ticker
+    out_path = out_dir / "news.jsonl"
+    _write_jsonl(items, out_path)
+    print(f"Wrote {out_path} ({len(items)} items)")
 
 
 if __name__ == "__main__":
