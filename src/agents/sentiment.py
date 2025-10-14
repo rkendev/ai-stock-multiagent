@@ -1,109 +1,179 @@
-# src/agents/sentiment.py
 from __future__ import annotations
 
-import argparse
-import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
-from ingest.news import fetch_rss_news
+# Prefer shared scorer; fall back safely if missing
+try:
+    from sentiment.score import score_text as _score_text  # type: ignore
+    from sentiment.score import score_articles_for_ticker as _score_for_ticker  # type: ignore
+except Exception:  # pragma: no cover
+    _score_text = None  # type: ignore[assignment]
+    _score_for_ticker = None  # type: ignore[assignment]
 
-POS = {"beat", "beats", "growth", "surge", "upgrade", "bullish", "record", "strong", "win", "wins", "profit"}
-NEG = {"miss", "cuts", "downgrade", "bearish", "slump", "weak", "loss", "lawsuit", "recall", "delay"}
-
-
-def _score_text(text: str) -> float:
-    t = text.lower()
-    pos = sum(1 for w in POS if w in t)
-    neg = sum(1 for w in NEG if w in t)
-    if pos == 0 and neg == 0:
-        return 0.0
-    return (pos - neg) / max(pos + neg, 1)
-
-
-# src/agents/sentiment.py
-def _label(score: float) -> str:
-    # tests expect uppercase labels
-    if score > 0:
-        return "POSITIVE"
-    if score < 0:
-        return "NEGATIVE"
-    return "NEUTRAL"
+# News fetcher used by tests/legacy agents (mock-friendly in CI)
+try:
+    from ingest.news import fetch_rss_news  # our back-compat shim
+except Exception:  # pragma: no cover
+    fetch_rss_news = None  # type: ignore[assignment]
 
 
-def _read_news_jsonl(path: Path) -> List[Dict]:
-    if not path.exists():
-        return []
-    rows: List[Dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
+def _ensure_scorer():
+    """Return a callable(text)->(score,label) even if sentiment.score is missing."""
+    if _score_text is not None:
+        return _score_text
+
+    # Tiny inline fallback (same heuristics used elsewhere)
+    POS_WORDS = {
+        "beats", "beat", "record", "surge", "rally", "upgraded",
+        "strong", "growth", "bullish", "outperform"
+    }
+    NEG_WORDS = {
+        "miss", "misses", "downgraded", "plunge", "fall", "weak",
+        "bearish", "lawsuit", "recall", "layoff"
+    }
+
+    def _fallback(text: str) -> tuple[float, str]:
+        t = text.lower()
+        pos = sum(w in t for w in POS_WORDS)
+        neg = sum(w in t for w in NEG_WORDS)
+        raw = pos - neg
+        if raw > 0:
+            return (min(1.0, 0.1 * raw), "POSITIVE")
+        if raw < 0:
+            return (max(-1.0, -0.1 * abs(raw)), "NEGATIVE")
+        return (0.0, "NEUTRAL")
+
+    return _fallback
+
+
+def _score_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Add (score, sentiment) to each record; tolerate missing fields.
+    Expects keys the tests use: title, summary (optional), link, published.
+    """
+    do_score = _ensure_scorer()
+    out: List[Dict[str, Any]] = []
+    for r in records:
+        title = str(r.get("title", "")).strip()
+        summary = str(r.get("summary", "")).strip()
+        text = f"{title} {summary}".strip()
+        sc, label = do_score(text)
+        rr = dict(r)
+        rr["score"] = float(sc)
+        rr["sentiment"] = label
+        out.append(rr)
+    return out
+
+
+def _read_scored_from_disk(sent_dir: Path) -> List[Dict[str, Any]]:
+    """Read scored JSONs from <sent_dir>/*.json as a list of dicts."""
+    items: List[Dict[str, Any]] = []
+    if sent_dir.exists():
+        import json
+        for p in sorted(sent_dir.glob("*.json")):
             try:
-                rows.append(json.loads(line))
+                items.append(json.loads(p.read_text()))
             except Exception:
                 continue
-    return rows
+    return items
+
+
+def _derive_in_root_from_news_root(news_root: str | Path) -> Path:
+    """
+    Our scorer expects: in_root / 'news' / <TICKER> / news.jsonl
+    If caller provides news_root='.../output/news', then in_root must be the parent ('.../output').
+    If caller already passes parent, we just return it unchanged.
+    """
+    nr = Path(news_root)
+    return nr.parent if nr.name == "news" else nr
+
+
+def _derive_written_sent_dir(out_root: str | Path, ticker: str) -> Path:
+    """
+    Tests sometimes pass out_root='<tmp>/output/sentiment' and expect files in
+    '<tmp>/output/sentiment/<TICKER>/*.json'. Our scorer writes to base_out/'sentiment'/<TICKER>.
+    So:
+      - if out_root already ends with 'sentiment', the final dir is out_root/<TICKER>
+      - else it's out_root/'sentiment'/<TICKER>
+    """
+    orp = Path(out_root)
+    if orp.name == "sentiment":
+        return orp / ticker
+    return orp / "sentiment" / ticker
+
+
+def _base_out_for_scorer(out_root: str | Path) -> Path:
+    """
+    Map the caller's out_root to the scorer's base_out:
+      scorer writes to base_out/'sentiment'/<TICKER>.
+      If caller passed '.../output/sentiment', base_out should be '.../output'.
+    """
+    orp = Path(out_root)
+    return orp.parent if orp.name == "sentiment" else orp
 
 
 def run_sentiment(
     ticker: str,
-    limit: int = 10,
+    *args: Any,
+    in_root: Optional[str] = None,
+    out_root: str = "output",
+    news_file: str = "news.jsonl",
     news_root: Optional[str] = None,
-    out_root: Optional[str] = None,
-) -> Union[List[Dict], Tuple[str, int]]:
+    **kwargs: Any,
+) -> Any:
     """
-    If news_root/out_root are None: return a LIST of scored items (no files).
-    If news_root/out_root are provided: write files and return (out_dir, n).
-    Each item includes: title, link, published, summary, score, sentiment.
+    Backwards-compatible entrypoint used by tests and agents.
+
+    Supported call styles:
+
+    1) Legacy in-memory (returns a LIST of scored items):
+         run_sentiment(ticker, limit:int)
+
+    2) On-disk pipeline (returns a TUPLE (out_dir: Path, n_written: int)):
+         run_sentiment(ticker,
+                       news_root='<...>/output/news',  # or in_root='<...>/output'
+                       out_root='<...>/output/sentiment',  # or '<...>/output'
+                       news_file='news.jsonl')
+
+       - Writes JSONs to:
+            if out_root endswith 'sentiment': <out_root>/<ticker>/*.json
+            else:                             <out_root>/sentiment/<ticker>/*.json
+       - Returns (out_dir, n_written) to match test expectations.
     """
-    items: List[Dict]
+
+    # ---- Style (1): legacy second positional arg is integer limit ----
+    if args and isinstance(args[0], int):
+        limit = int(args[0])
+        if fetch_rss_news is None:
+            raise RuntimeError("ingest.news.fetch_rss_news is not available")
+        news_items = fetch_rss_news(ticker, limit)  # our shim pads to exactly `limit`
+        return _score_records(news_items)
+
+    # ---- Style (2): on-disk pipeline ----
+    if _score_for_ticker is None:
+        raise RuntimeError("sentiment.score.score_articles_for_ticker not available")
+
+    # Map news_root (legacy) to in_root expected by the scorer
+    effective_in_root: Path
     if news_root:
-        news_path = Path(news_root) / ticker / "news.jsonl"
-        items = _read_news_jsonl(news_path)
-        if not items:
-            items = fetch_rss_news(ticker, limit=limit)
+        effective_in_root = _derive_in_root_from_news_root(news_root)
+    elif in_root:
+        effective_in_root = Path(in_root)
     else:
-        items = fetch_rss_news(ticker, limit=limit)
+        # default to 'output', consistent with scorer defaults
+        effective_in_root = Path("output")
 
-    scored: List[Dict] = []
-    for r in items[:limit]:
-        title = r.get("title", "")
-        score = float(_score_text(title))
-        scored.append({
-            "published": r.get("published"),
-            "title": title,
-            # accept either 'link' or 'url' from inputs; output 'link'
-            "link": r.get("link") or r.get("url"),
-            "summary": r.get("summary", ""),
-            "score": score,
-            "sentiment": _label(score),
-        })
+    # The scorer writes to base_out/'sentiment'/<TICKER>
+    base_out = _base_out_for_scorer(out_root)
 
-    # If no out_root given -> return list (used by test_run_sentiment)
-    if not out_root:
-        return scored
+    # Run the scorer; it returns count written
+    n_written = _score_for_ticker(ticker, in_root=str(effective_in_root), out_root=str(base_out), news_file=news_file)
 
-    # Otherwise, write files and return (out_dir, n) (used by test_sentiment_agent)
-    out_dir = Path(out_root) / ticker
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for i, payload in enumerate(scored, start=1):
-        (out_dir / f"{i:04d}.json").write_text(json.dumps(payload, indent=2))
-    return (str(out_dir), len(scored))
+    # Compute actual directory where files were written
+    out_dir = _derive_written_sent_dir(out_root, ticker)
+
+    return out_dir, n_written
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description="Score headlines and write sentiment JSON files.")
-    p.add_argument("--ticker", required=True)
-    p.add_argument("--limit", type=int, default=10)
-    p.add_argument("--news-root", default=None)
-    p.add_argument("--out-root", default=None)
-    args = p.parse_args()
-
-    res = run_sentiment(args.ticker, limit=args.limit, news_root=args.news_root, out_root=args.out_root)
-    if isinstance(res, tuple):
-        out_dir, n = res
-        print(f"Wrote {n} sentiment files to {out_dir}")
-    else:
-        print(f"Scored {len(res)} headlines")
+__all__ = ["run_sentiment"]
