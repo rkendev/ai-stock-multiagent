@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -163,26 +164,57 @@ def _mk_fundamental_summary(ticker: str, fund: dict) -> str:
     return "**Fundamental Snapshot**\n- " + "\n- ".join(bits)
 
 
-def _write_report_md(ticker: str, out_dir: Path, sections: Dict[str, str],
-                     has_fundamentals: bool, has_sentiment: bool) -> Path:
+def _write_report_md(
+    ticker: str,
+    out_dir: Path,
+    sections: Dict[str, str],
+    has_fundamentals: Optional[bool] = None,
+    has_sentiment: Optional[bool] = None,
+) -> Path:
+    """
+    Write the Markdown report. Backwards compatible with the older
+    3-argument test signature.
+
+    If has_fundamentals/has_sentiment are None, infer from `sections`
+    (presence of "fundamentals"/"sentiment" keys with truthy content).
+    """
+    if has_fundamentals is None:
+        has_fundamentals = bool(sections.get("fundamentals"))
+    if has_sentiment is None:
+        has_sentiment = bool(sections.get("sentiment"))
+
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "report.md"
 
-    content = [f"# {ticker} — MVP Technical Report", "", sections["technical"]]
-    if "fundamental" in sections:
-        content += ["", sections["fundamental"]]
-    if "sentiment" in sections:
-        content += ["", sections["sentiment"]]
+    lines = [
+        f"# {ticker} — MVP Technical Report",   # ← exact text the test expects
+        "",
+        f"_Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}_",
+        "",
+    ]
 
-    tail = "price/technical"
-    if has_fundamentals:
-        tail += " + fundamental"
-    if has_sentiment:
-        tail += " + sentiment"
-    content += ["", f"_Note: MVP report generated from {tail} data._"]
+    tech = sections.get("technical")
+    if tech:
+        lines += ["## Technical Summary", tech, ""]
 
-    out_path.write_text("\n".join(content))
-    return out_path
+    fund = sections.get("fundamentals")
+    if fund:
+        lines += ["## Fundamentals", fund, ""]
+
+    senti = sections.get("sentiment")
+    if senti:
+        lines += ["## Sentiment", senti, ""]
+
+    # small footer showing what made it in
+    lines += [
+        "**Included sections:** "
+        f"technical {'✅' if bool(tech) else '—'}, "
+        f"fundamentals {'✅' if has_fundamentals else '—'}, "
+        f"sentiment {'✅' if has_sentiment else '—'}"
+    ]
+
+    path = out_dir / "report.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 def main() -> None:
