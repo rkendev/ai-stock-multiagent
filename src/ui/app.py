@@ -9,6 +9,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from ui.analyst_widget import render as render_analyst_widget
+
 
 # FIX: repo root is two levels up (repo/src/ui/app.py -> parents[2] == repo)
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -285,6 +287,19 @@ def main() -> None:
             st.info("News exists but no sentiment files were found. Run the sentiment step or fix the writer path/extension.")
         else:
             st.info("No news found for this ticker/date window. Check your since filter, ticker mapping, or API key.")
+
+    # -----------------------
+    # AI Analyst (expander)
+    # -----------------------
+    st.markdown("---")
+    with st.expander("AI Analyst", expanded=False):
+        # pass canonical roots as strings
+        render_analyst_widget(
+            ticker,
+            data_dir=str(DATA_ROOT),
+            out_dir=str(OUT_ROOT),
+            sent_root=str(OUT_ROOT / "sentiment"),
+        )
 
     st.markdown("---")
 
