@@ -9,18 +9,36 @@ from datetime import datetime, timezone
 import pandas as pd
 
 
+# ----------------------------
+# Loaders (tolerant of layouts)
+# ----------------------------
+def _load_prices_any(ticker: str, data_dir: Path, out_dir: Path) -> pd.DataFrame:
+    """
+    Try data/<TICKER>/prices.parquet, then output/<TICKER>/prices.parquet.
+    Normalize to have a 'Close' column and tz-naive DatetimeIndex.
+    """
+    candidates = [
+        data_dir / ticker / "prices.parquet",
+        out_dir / ticker / "prices.parquet",
+    ]
+    for p in candidates:
+        if p.exists():
+            return _load_prices(p)
+    raise FileNotFoundError(f"Missing prices parquet; tried: {', '.join(str(c) for c in candidates)}")
+
+
 def _load_prices(prices_path: Path) -> pd.DataFrame:
     df = pd.read_parquet(prices_path)
-    # Normalize columns/index
+    # Flatten MultiIndex columns if present
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    # Normalize a 'Close' column
     if "Close" not in df.columns:
-        # Try common variants
         for c in df.columns:
             if str(c).lower() == "close":
                 df = df.rename(columns={c: "Close"})
                 break
-    # Ensure datetime index
+    # Datetime index, tz-naive, sorted
     if not isinstance(df.index, pd.DatetimeIndex):
         try:
             df.index = pd.to_datetime(df.index, utc=False)
@@ -31,18 +49,63 @@ def _load_prices(prices_path: Path) -> pd.DataFrame:
             df.index = df.index.tz_localize(None)
         df = df.sort_index()
     if "Close" not in df.columns:
-        raise ValueError("Parquet must include a 'Close' column")
+        raise ValueError("Parquet must include a 'Close' column (case-insensitive)")
     return df
 
 
 def _load_json(path: Path) -> Dict[str, Any]:
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _load_technical(path: Path) -> Dict[str, Any]:
     return _load_json(path)
 
 
+def _load_sentiment_items(sent_dir: Path) -> List[Dict[str, Any]]:
+    """
+    Load sentiment items from per-article JSON files. Be tolerant:
+    - If a file contains a list, extend with its dict items.
+    - If a file contains a dict, append it.
+    - Skip everything else.
+    """
+    if not sent_dir.exists():
+        return []
+    items: List[Dict[str, Any]] = []
+    for p in sorted(sent_dir.glob("*.json")):
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            items.append(obj)
+        elif isinstance(obj, list):
+            items.extend([o for o in obj if isinstance(o, dict)])
+        # else: skip
+    return items
+
+
+def _load_fundamentals_any(ticker: str, data_dir: Path, out_dir: Path) -> Optional[dict]:
+    """
+    Prefer output/fundamentals/<TICKER>.json (FMP adapter),
+    fall back to data/<TICKER>/fundamentals.json or fundamental.json.
+    """
+    candidates = [
+        out_dir.parent / "fundamentals" / f"{ticker}.json",  # output/fundamentals/<T>.json
+        data_dir / ticker / "fundamentals.json",
+        data_dir / ticker / "fundamental.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                return _load_json(p)
+            except Exception:
+                continue
+    return None
+
+
+# ----------------------------
+# Render helpers
+# ----------------------------
 def _mk_technical_summary(ticker: str, asof: str, tech: Dict[str, Any], prices: pd.DataFrame) -> str:
     sig = tech.get("signals", {})
     close = float(prices["Close"].iloc[-1])
@@ -84,18 +147,6 @@ def _mk_technical_summary(ticker: str, asof: str, tech: Dict[str, Any], prices: 
     return "\n".join(lines)
 
 
-def _load_sentiment_items(sent_dir: Path) -> List[Dict[str, Any]]:
-    if not sent_dir.exists():
-        return []
-    items: List[Dict[str, Any]] = []
-    for p in sorted(sent_dir.glob("*.json")):
-        try:
-            items.append(json.loads(p.read_text()))
-        except Exception:
-            continue
-    return items
-
-
 def _split_top_headlines(items: List[Dict[str, Any]], k: int = 3) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     def _score(it: Dict[str, Any]) -> float:
         try:
@@ -110,8 +161,11 @@ def _split_top_headlines(items: List[Dict[str, Any]], k: int = 3) -> Tuple[List[
 
 
 def _mk_sentiment_summary(items: List[Dict[str, Any]]) -> Optional[str]:
+    # guard: only dicts
+    items = [it for it in items if isinstance(it, dict)]
     if not items:
         return None
+
     scores: List[float] = []
     for i in items:
         try:
@@ -119,10 +173,13 @@ def _mk_sentiment_summary(items: List[Dict[str, Any]]) -> Optional[str]:
         except Exception:
             pass
     n = max(1, len(items))
-    avg = sum(scores) / len(scores) if scores else 0.0
+    avg = (sum(scores) / len(scores)) if scores else 0.0
 
     def pct(label: str) -> float:
-        return 100.0 * sum(1 for it in items if str(it.get("sentiment", "")).upper() == label) / n
+        # label is POSITIVE | NEUTRAL | NEGATIVE
+        return 100.0 * sum(
+            1 for it in items if str(it.get("sentiment", "")).upper() == label
+        ) / n
 
     pos = pct("POSITIVE"); neu = pct("NEUTRAL"); neg = pct("NEGATIVE")
     top_pos, top_neg = _split_top_headlines(items, 3)
@@ -130,11 +187,10 @@ def _mk_sentiment_summary(items: List[Dict[str, Any]]) -> Optional[str]:
     def _fmt(it: Dict[str, Any]) -> str:
         title = str(it.get("title", "")).strip()
         link = (it.get("link") or it.get("url") or "").strip()
-        score = 0.0
         try:
             score = float(it.get("score", 0.0))
         except Exception:
-            pass
+            score = 0.0
         base = f"  - {title} *(score {score:+.2f})*"
         return f"{base} — {link}" if link else base
 
@@ -151,19 +207,51 @@ def _mk_sentiment_summary(items: List[Dict[str, Any]]) -> Optional[str]:
     return "\n".join(lines)
 
 
-def _load_fundamental_json(path: Path) -> Optional[dict]:
-    return json.loads(path.read_text()) if path.exists() else None
-
-
 def _mk_fundamental_summary(ticker: str, fund: dict) -> str:
-    sig = (fund or {}).get("signals", {})
-    bits = []
-    bits.append("YoY revenue growth positive" if sig.get("rev_yoy_positive") else "YoY revenue growth not confirmed")
-    bits.append("YoY earnings growth positive" if sig.get("eps_yoy_positive") else "YoY earnings growth not confirmed")
-    bits.append("margin improving" if sig.get("margin_improving") else "margin not improving")
-    return "**Fundamental Snapshot**\n- " + "\n- ".join(bits)
+    """
+    Render fundamentals from either:
+      - fund['signals'] (legacy)  OR
+      - fund['metrics'] (FMP adapter: revenue_yoy, net_income_yoy, margins...)
+    """
+    sig = (fund or {}).get("signals")
+    if isinstance(sig, dict) and sig:
+        bits = []
+        bits.append("YoY revenue growth positive" if sig.get("rev_yoy_positive") else "YoY revenue growth not confirmed")
+        bits.append("YoY earnings growth positive" if sig.get("eps_yoy_positive") else "YoY earnings growth not confirmed")
+        bits.append("margin improving" if sig.get("margin_improving") else "margin not improving")
+        return "**Fundamental Snapshot**\n- " + "\n- ".join(bits)
+
+    # Fallback: infer quick signals from FMP metrics
+    m = (fund or {}).get("metrics", {}) or {}
+    rev_yoy = m.get("revenue_yoy")
+    ni_yoy = m.get("net_income_yoy")
+    gm = m.get("gross_margin")
+    om = m.get("operating_margin")
+
+    def _pct(v):
+        try:
+            return f"{float(v)*100:+.1f}%"
+        except Exception:
+            return "N/A"
+
+    bits: List[str] = ["**Fundamental Snapshot**"]
+    if rev_yoy is not None:
+        bits.append(f"- Revenue YoY: {_pct(rev_yoy)}")
+    if ni_yoy is not None:
+        bits.append(f"- Net income YoY: {_pct(ni_yoy)}")
+    if gm is not None:
+        bits.append(f"- Gross margin (TTM): {float(gm)*100:.1f}%")
+    if om is not None:
+        bits.append(f"- Operating margin (TTM): {float(om)*100:.1f}%")
+
+    if len(bits) == 1:
+        bits.append("- (No fundamentals available yet)")
+    return "\n".join(bits)
 
 
+# ----------------------------
+# Markdown writer
+# ----------------------------
 def _write_report_md(
     ticker: str,
     out_dir: Path,
@@ -186,7 +274,7 @@ def _write_report_md(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     lines = [
-        f"# {ticker} — MVP Technical Report",   # ← exact text the test expects
+        f"# {ticker} — MVP Technical Report",
         "",
         f"_Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}_",
         "",
@@ -204,7 +292,6 @@ def _write_report_md(
     if senti:
         lines += ["## Sentiment", senti, ""]
 
-    # small footer showing what made it in
     lines += [
         "**Included sections:** "
         f"technical {'✅' if bool(tech) else '—'}, "
@@ -217,48 +304,58 @@ def _write_report_md(
     return path
 
 
+# ----------------------------
+# CLI
+# ----------------------------
 def main() -> None:
     ap = argparse.ArgumentParser(description="Generate report.md")
     ap.add_argument("--ticker", required=True)
     ap.add_argument("--data-dir", default="data")
     ap.add_argument("--out-dir", default="output")
     ap.add_argument("--sent-root", default="output/sentiment")
+    # accept legacy alias names too
+    ap.add_argument("--out-root", dest="out_dir_alias", default=None)
     args = ap.parse_args()
 
-    prices_path = Path(args.data_dir) / args.ticker / "prices.parquet"
-    tech_path = Path(args.data_dir) / args.ticker / "technical.json"
-    fund_path = Path(args.data_dir) / args.ticker / "fundamental.json"
+    data_dir = Path(args.data_dir)
+    out_dir = Path(args.out_dir if args.out_dir else (args.out_dir_alias or "output"))
+    sent_root = Path(args.sent_root)
 
-    if not prices_path.exists():
-        raise FileNotFoundError(f"Missing prices: {prices_path}")
-    if not tech_path.exists():
-        # tolerate missing technical by fabricating neutral signals so report still renders
-        tech = {"signals": {}}
-    else:
+    # Load prices (data/ first, then output/)
+    prices = _load_prices_any(args.ticker, data_dir, out_dir)
+
+    # Technical: tolerate missing; render with neutral bias if absent
+    tech_path = data_dir / args.ticker / "technical.json"
+    if tech_path.exists():
         tech = _load_technical(tech_path)
+    else:
+        tech = {"signals": {}}
 
-    prices = _load_prices(prices_path)
-    # asof choice: prefer technical.json, else last price date
+    # as-of date: prefer technical.json -> last price date
     asof = tech.get("asof")
-    if not asof:
-        asof = str(prices.index[-1].date()) if isinstance(prices.index, pd.DatetimeIndex) and len(prices) else "N/A"
+    if not asof and isinstance(prices.index, pd.DatetimeIndex) and len(prices):
+        asof = str(prices.index[-1].date())
+    asof = asof or "N/A"
     technical_md = _mk_technical_summary(args.ticker, asof, tech, prices)
 
     sections: Dict[str, str] = {"technical": technical_md}
 
-    fund = _load_fundamental_json(fund_path)
+    # Fundamentals: prefer output/fundamentals/<T>.json; fallback to data/
+    fund = _load_fundamentals_any(args.ticker, data_dir, out_dir)
     has_fund = bool(fund)
     if fund:
-        sections["fundamental"] = _mk_fundamental_summary(args.ticker, fund)
+        sections["fundamentals"] = _mk_fundamental_summary(args.ticker, fund)
 
-    sent_items = _load_sentiment_items(Path(args.sent_root) / args.ticker)
+    # Sentiment
+    sent_items = _load_sentiment_items(sent_root / args.ticker)
     sent_md = _mk_sentiment_summary(sent_items)
     has_sent = bool(sent_md)
     if sent_md:
         sections["sentiment"] = sent_md
 
-    out_dir = Path(args.out_dir) / args.ticker
-    out = _write_report_md(args.ticker, out_dir, sections, has_fund, has_sent)
+    # Write
+    out_dir_ticker = out_dir / args.ticker
+    out = _write_report_md(args.ticker, out_dir_ticker, sections, has_fund, has_sent)
     print(f"Wrote {out}")
 
 

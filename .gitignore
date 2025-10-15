@@ -64,3 +64,11 @@ seed_project.sh
 seed_with_labels.sh
 tools/
 
+
+output/
+data/
+.venv/
+__pycache__/
+*.pyc
+code_agent_*.zip
+
