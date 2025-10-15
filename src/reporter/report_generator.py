@@ -8,6 +8,13 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+# NEW: AI Analyst (fails soft if module/env not present)
+try:
+    from analyst.compose import build_facts, render_analyst_take
+except Exception:  # pragma: no cover
+    build_facts = None
+    render_analyst_take = None
+
 
 # ----------------------------
 # Loaders (tolerant of layouts)
@@ -24,7 +31,9 @@ def _load_prices_any(ticker: str, data_dir: Path, out_dir: Path) -> pd.DataFrame
     for p in candidates:
         if p.exists():
             return _load_prices(p)
-    raise FileNotFoundError(f"Missing prices parquet; tried: {', '.join(str(c) for c in candidates)}")
+    raise FileNotFoundError(
+        f"Missing prices parquet; tried: {', '.join(str(c) for c in candidates)}"
+    )
 
 
 def _load_prices(prices_path: Path) -> pd.DataFrame:
@@ -106,7 +115,9 @@ def _load_fundamentals_any(ticker: str, data_dir: Path, out_dir: Path) -> Option
 # ----------------------------
 # Render helpers
 # ----------------------------
-def _mk_technical_summary(ticker: str, asof: str, tech: Dict[str, Any], prices: pd.DataFrame) -> str:
+def _mk_technical_summary(
+    ticker: str, asof: str, tech: Dict[str, Any], prices: pd.DataFrame
+) -> str:
     sig = tech.get("signals", {})
     close = float(prices["Close"].iloc[-1])
 
@@ -147,12 +158,15 @@ def _mk_technical_summary(ticker: str, asof: str, tech: Dict[str, Any], prices: 
     return "\n".join(lines)
 
 
-def _split_top_headlines(items: List[Dict[str, Any]], k: int = 3) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _split_top_headlines(
+    items: List[Dict[str, Any]], k: int = 3
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     def _score(it: Dict[str, Any]) -> float:
         try:
             return float(it.get("score", 0.0))
         except Exception:
             return 0.0
+
     pos = [it for it in items if str(it.get("sentiment", "")).upper() == "POSITIVE"]
     neg = [it for it in items if str(it.get("sentiment", "")).upper() == "NEGATIVE"]
     pos.sort(key=_score, reverse=True)
@@ -181,7 +195,9 @@ def _mk_sentiment_summary(items: List[Dict[str, Any]]) -> Optional[str]:
             1 for it in items if str(it.get("sentiment", "")).upper() == label
         ) / n
 
-    pos = pct("POSITIVE"); neu = pct("NEUTRAL"); neg = pct("NEGATIVE")
+    pos = pct("POSITIVE")
+    neu = pct("NEUTRAL")
+    neg = pct("NEGATIVE")
     top_pos, top_neg = _split_top_headlines(items, 3)
 
     def _fmt(it: Dict[str, Any]) -> str:
@@ -216,9 +232,19 @@ def _mk_fundamental_summary(ticker: str, fund: dict) -> str:
     sig = (fund or {}).get("signals")
     if isinstance(sig, dict) and sig:
         bits = []
-        bits.append("YoY revenue growth positive" if sig.get("rev_yoy_positive") else "YoY revenue growth not confirmed")
-        bits.append("YoY earnings growth positive" if sig.get("eps_yoy_positive") else "YoY earnings growth not confirmed")
-        bits.append("margin improving" if sig.get("margin_improving") else "margin not improving")
+        bits.append(
+            "YoY revenue growth positive"
+            if sig.get("rev_yoy_positive")
+            else "YoY revenue growth not confirmed"
+        )
+        bits.append(
+            "YoY earnings growth positive"
+            if sig.get("eps_yoy_positive")
+            else "YoY earnings growth not confirmed"
+        )
+        bits.append(
+            "margin improving" if sig.get("margin_improving") else "margin not improving"
+        )
         return "**Fundamental Snapshot**\n- " + "\n- ".join(bits)
 
     # Fallback: infer quick signals from FMP metrics
@@ -292,11 +318,16 @@ def _write_report_md(
     if senti:
         lines += ["## Sentiment", senti, ""]
 
+    analyst = sections.get("analyst_take")
+    if analyst:
+        lines += ["## Analyst Take", analyst, ""]
+
     lines += [
         "**Included sections:** "
         f"technical {'✅' if bool(tech) else '—'}, "
         f"fundamentals {'✅' if has_fundamentals else '—'}, "
-        f"sentiment {'✅' if has_sentiment else '—'}"
+        f"sentiment {'✅' if has_sentiment else '—'}, "
+        f"analyst_take {'✅' if bool(analyst) else '—'}"
     ]
 
     path = out_dir / "report.md"
@@ -352,6 +383,19 @@ def main() -> None:
     has_sent = bool(sent_md)
     if sent_md:
         sections["sentiment"] = sent_md
+
+    # Analyst Take (fail-soft)
+    if build_facts and render_analyst_take:
+        try:
+            facts = build_facts(
+                args.ticker, data_dir=str(data_dir), out_dir=str(out_dir), sent_root=str(sent_root)
+            )
+            analyst_text = render_analyst_take(facts)
+            if analyst_text:
+                sections["analyst_take"] = analyst_text
+        except Exception:
+            # do not fail the whole report if analyst step errors
+            pass
 
     # Write
     out_dir_ticker = out_dir / args.ticker
