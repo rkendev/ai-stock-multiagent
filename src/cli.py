@@ -5,26 +5,57 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import json, re
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _pyenv() -> dict:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    return env
 
 def _runpy(mod: str, *args: str) -> None:
-    env = os.environ.copy()
-    # Ensure src is importable
-    src = str(Path(__file__).resolve().parent)
-    repo_root = str(Path(src).parent)
-    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
     cmd = [sys.executable, "-m", mod, *args]
-    subprocess.run(cmd, check=True, env=env)
+    subprocess.run(cmd, check=True, env=_pyenv(), text=True)
+    
+
+def _runpy_soft(mod: str, *args: str) -> None:
+    cmd = [sys.executable, "-m", mod, *args]
+    proc = subprocess.run(cmd, check=False, env=_pyenv(), capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"[warn] {mod} failed (non-fatal):\n{proc.stderr or proc.stdout}")
+
+
+def _purge_legacy_sentiment(ticker: str, root: str = "output/sentiment") -> None:
+    p = Path(root) / ticker
+    if not p.exists():
+        return
+    for f in p.glob("*.json"):
+        try:
+            if f.read_text(encoding="utf-8").lstrip().startswith("["):
+                f.unlink()
+        except Exception:
+            pass
 
 
 def refresh(ticker: str, since: str, limit: int) -> None:
-    _runpy("ingest.prices", "--ticker", ticker, "--since", since, "--out-root", "data")
-    # technical.json generation assumed elsewhere in your pipeline; keep existing one if present
-
     _runpy("ingest.news", "--ticker", ticker, "--out-root", "output", "--limit", str(limit), "--since", since)
-    _runpy("agents.sentiment", "--ticker", ticker, "--news-root", "output/news", "--out-root", "output/sentiment", "--limit", str(limit))
     _runpy("sentiment.score", "--ticker", ticker, "--in-root", "output", "--out-root", "output")
-    _runpy("reporter.report_generator", "--ticker", ticker, "--data-dir", "data", "--out-dir", "output")
+
+    # NEW: build price parquet before technical
+    _runpy("ingest.prices", "--ticker", ticker, "--out-root", "output", "--since", since)
+
+    # NEW: fundamentals & technical as soft steps (don’t kill batch on timeout/missing data)
+    _runpy_soft("ingest.fundamentals_fmp", "--ticker", ticker, "--out-root", "outpu t")
+    _runpy_soft("agents.technical", "--ticker", ticker, "--data-root", "data")
+
+    _purge_legacy_sentiment(ticker)
+    _runpy("reporter.report_generator", 
+        "--ticker", ticker,
+        "--out-dir", "output",
+        "--data-dir", "data",
+        "--sent-root", "output/sentiment")
 
 
 def main() -> None:

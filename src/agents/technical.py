@@ -1,140 +1,236 @@
 # src/agents/technical.py
 from __future__ import annotations
 
-import argparse
 import json
-from dataclasses import dataclass
+import os
 from pathlib import Path
-from typing import Dict, Optional
-
+from typing import Any, Optional, List
 import numpy as np
 import pandas as pd
 
-# Module-level defaults so tests can monkeypatch these
-DATA_DIR = "data"
-OUT_DIR = "data"
-
-
-def _load_prices(parquet_path: Path) -> pd.DataFrame:
-    df = pd.read_parquet(parquet_path)
-    if isinstance(df.index, pd.DatetimeIndex):
-        df = df.sort_index()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    if "Close" not in df.columns:
-        raise ValueError("Parquet must include a 'Close' column")
-    return df
+# Default data directory (override in tests or via env)
+DATA_DIR = os.getenv("DATA_ROOT", "data")
 
 
 def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    gain = pd.Series(gain, index=series.index).rolling(period, min_periods=period).mean()
-    loss = pd.Series(loss, index=series.index).rolling(period, min_periods=period).mean()
-    rs = gain / loss
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
     rsi = 100 - (100 / (1 + rs))
-    return rsi.bfill().fillna(50.0)
+    return rsi.fillna(50.0)  # neutral when undefined
 
 
-def _volatility(series: pd.Series, window: int = 20) -> pd.Series:
-    returns = series.pct_change()
-    return returns.rolling(window, min_periods=window).std().bfill()
+def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    # use high/low/close if available; otherwise fall back to close-range
+    close = df["close"]
+    high = df.get("high", close)
+    low = df.get("low", close)
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    return atr
 
 
-@dataclass
-class TechnicalConfig:
-    ma_windows: tuple = (20, 50, 200)
-    rsi_period: int = 14
-    vol_window: int = 20
+def _normalize_price_df(df: pd.DataFrame) -> pd.DataFrame:
+    # Flatten MultiIndex
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
 
+    # lowercase + snake-ish
+    rename_map = {c: str(c).strip().lower().replace(" ", "_") for c in df.columns}
+    df = df.rename(columns=rename_map)
 
-def compute_indicators(df: pd.DataFrame, cfg: TechnicalConfig) -> pd.DataFrame:
-    out = df.copy()
-    for w in cfg.ma_windows:
-        out[f"MA{w}"] = out["Close"].rolling(w, min_periods=1).mean()
-    out[f"RSI{cfg.rsi_period}"] = _rsi(out["Close"], cfg.rsi_period)
-    out[f"VOL{cfg.vol_window}"] = _volatility(out["Close"], cfg.vol_window)
-    return out
-
-
-def make_signals(df: pd.DataFrame, cfg: TechnicalConfig) -> Dict[str, bool]:
-    latest = df.iloc[-1]
-    signals = {
-        "above_MA50": bool(latest.get("Close", np.nan) > latest.get("MA50", np.nan))
-        if "MA50" in df.columns else False,
-        "above_MA200": bool(latest.get("Close", np.nan) > latest.get("MA200", np.nan))
-        if "MA200" in df.columns else False,
-        "overbought": bool(latest.get(f"RSI{cfg.rsi_period}", 50) > 70),
-        "oversold": bool(latest.get(f"RSI{cfg.rsi_period}", 50) < 30),
-        "rally_volatility_high": bool(
-            latest.get(f"VOL{cfg.vol_window}", 0)
-            > df[f"VOL{cfg.vol_window}"].median()
-        )
-        if f"VOL{cfg.vol_window}" in df.columns else False,
+    # promote aliases → canonical
+    alias_map = {
+        "close": ["close", "adj_close", "adjusted_close", "close_price", "price"],
+        "open": ["open"],
+        "high": ["high"],
+        "low": ["low"],
+        "ma50": ["ma50", "sma50", "moving_average_50"],
+        "ma200": ["ma200", "sma200", "moving_average_200"],
     }
-    return signals
+
+    def first_existing(cands: List[str]) -> Optional[str]:
+        for n in cands:
+            if n in df.columns:
+                return n
+        return None
+
+    col_promote = {}
+    for target, candidates in alias_map.items():
+        src = first_existing(candidates)
+        if src and src != target:
+            col_promote[src] = target
+    if col_promote:
+        df = df.rename(columns=col_promote)
+
+    # index cleanup
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors="coerce")
+    if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+    return df.sort_index()
 
 
-def dump_json(ticker: str, df_ind: pd.DataFrame, cfg: TechnicalConfig, out_path: Path) -> None:
-    last_date = df_ind.index[-1]
+def compute_signals(ticker: str, data_root: Optional[str] = None) -> Path:
+    """
+    Compute RSI(14), ATR(14) percentile (1y), and 52w proximity from prices.parquet.
+    Writes data/<TICKER>/technical.json and returns that Path.
+
+    Also tolerates prices at output/<TICKER>/prices.parquet if data/ is missing.
+    """
+    # resolve data_root default to module-level DATA_DIR
+    if data_root is None:
+        data_root = DATA_DIR
+
+    # Look for prices in data/ first, then output/
+    p_data = Path(data_root) / ticker / "prices.parquet"
+    p_out = Path("output") / ticker / "prices.parquet"
+    if p_data.exists():
+        p = p_data
+    elif p_out.exists():
+        p = p_out
+    else:
+        raise FileNotFoundError(f"Prices parquet not found: {p_data} or {p_out}")
+
+    df = pd.read_parquet(p)
+    df = _normalize_price_df(df)
+
+    if "close" not in df.columns:
+        raise ValueError(
+            "prices.parquet must include a 'close' column (aliases supported: adj_close/adjusted_close)"
+        )
+
+    # Compute MAs if missing
+    if "ma50" not in df.columns:
+        df["ma50"] = df["close"].rolling(window=50, min_periods=1).mean()
+    if "ma200" not in df.columns:
+        df["ma200"] = df["close"].rolling(window=200, min_periods=1).mean()
+
+    # RSI(14)
+    rsi14 = _rsi(df["close"], 14)
+    rsi_latest = float(rsi14.iloc[-1])
+
+    # ATR(14) + 1y percentile (robust percentile calc)
+    atr14 = _atr(df, 14)
+    lookback = min(len(atr14), 252)
+    if lookback >= 20:
+        ref = atr14.iloc[-lookback:]
+        current = float(ref.iloc[-1])
+        pct = float((ref <= current).mean())  # percentile of current vs 1y window
+    else:
+        pct = 0.0
+
+    # 52-week proximity
+    window = min(len(df), 252)
+    close = df["close"]
+    if window >= 2:
+        last = float(close.iloc[-1])
+        high_52w = float(close.iloc[-window:].max())
+        low_52w = float(close.iloc[-window:].min())
+        dist_high = (high_52w - last) / high_52w if high_52w else 0.0
+        dist_low = (last - low_52w) / low_52w if low_52w else 0.0
+    else:
+        dist_high = dist_low = 0.0
+
+    # Flags
+    above_ma50 = bool(close.iloc[-1] > df["ma50"].iloc[-1])
+    above_ma200 = bool(close.iloc[-1] > df["ma200"].iloc[-1])
+    overbought = bool(rsi_latest >= 70)
+    oversold = bool(rsi_latest <= 30)
+    volatility_high = bool(pct >= 0.8)  # ≥80th percentile
+
     payload = {
         "ticker": ticker,
-        "asof": str(last_date.date() if hasattr(last_date, "date") else last_date),
-        "indicators": {
-            "MA20": df_ind["MA20"].tolist() if "MA20" in df_ind else [],
-            "MA50": df_ind["MA50"].tolist() if "MA50" in df_ind else [],
-            "MA200": df_ind["MA200"].tolist() if "MA200" in df_ind else [],
-            "RSI14": df_ind["RSI14"].tolist() if "RSI14" in df_ind else [],
-            "volatility_20d": df_ind["VOL20"].tolist() if "VOL20" in df_ind else [],
+        "signals": {
+            "above_MA50": above_ma50,
+            "above_MA200": above_ma200,
+            "overbought": overbought,
+            "oversold": oversold,
+            "rally_volatility_high": volatility_high,
         },
-        "signals": make_signals(df_ind, cfg),
+        "indicators": {
+            "RSI14": rsi_latest,
+            "MA50": float(df["ma50"].iloc[-1]),
+            "MA200": float(df["ma200"].iloc[-1]),
+            "ATR14": float(atr14.iloc[-1]) if len(atr14) else 0.0,
+            "ATR14_percentile_1y": pct,
+            "dist_to_52w_high_pct": dist_high,
+            "dist_from_52w_low_pct": dist_low,
+        },
     }
+
+    out_path = Path(data_root) / ticker / "technical.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w") as f:
-        json.dump(payload, f, indent=2)
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return out_path
 
 
-def run_technical(
-    ticker: str,
-    data_dir: Optional[str] = None,
-    out_dir: Optional[str] = None
-) -> Dict[str, object]:
+# ---- Backwards-compatible wrapper expected by tests ----
+def run_technical(ticker: str, *args: Any, data_root: Optional[str] = None, **kwargs: Any) -> dict:
     """
-    Loads <data_dir>/<ticker>/prices.parquet, computes indicators & signals,
-    writes <out_dir>/<ticker>/technical.json, and returns a small summary dict
-    the tests expect: {'rsi': float, 'ma50': float, 'overbought': bool, 'path': str}
+    Compatibility entrypoint used by tests.
+
+    Supports:
+      - run_technical(ticker)                         -> uses DATA_DIR (monkey-patchable), returns dict
+      - run_technical(ticker, "<custom_data>")        -> legacy positional data_root
+      - run_technical(ticker, data_root="...")        -> keyword data_root
+
+    Returns dict with at least:
+      {"rsi": float, "ma50": float, "overbought": bool}
     """
-    data_dir = data_dir or DATA_DIR
-    out_dir = out_dir or OUT_DIR
+    # Legacy positional form: run_technical(ticker, "<data_root>")
+    if args and isinstance(args[0], str):
+        data_root = args[0]
+    if data_root is None:
+        data_root = DATA_DIR
 
-    parquet_path = Path(data_dir) / ticker / "prices.parquet"
-    if not parquet_path.exists():
-        raise FileNotFoundError(f"Missing: {parquet_path}")
+    # Write JSON to disk via the canonical path
+    path = compute_signals(ticker, data_root=data_root)
 
-    df = _load_prices(parquet_path)
-    cfg = TechnicalConfig()
-    df_ind = compute_indicators(df, cfg)
+    # Read it back and build a flat, test-friendly summary
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
 
-    out_json = Path(out_dir) / ticker / "technical.json"
-    dump_json(ticker, df_ind, cfg, out_json)
+    ind = (data or {}).get("indicators", {}) or {}
+    sig = (data or {}).get("signals", {}) or {}
 
-    latest = df_ind.iloc[-1]
-    rsi_val = float(latest.get("RSI14", 50.0))
-    ma50_val = float(latest.get("MA50", latest["Close"]))
-    overbought = bool(rsi_val > 70.0)
-    return {"rsi": rsi_val, "ma50": ma50_val, "overbought": overbought, "path": str(out_json)}
+    # Map to legacy flat keys the test checks
+    result = {
+        "rsi": float(ind.get("RSI14", 0.0)),
+        "ma50": float(ind.get("MA50", 0.0)),
+        "overbought": bool(sig.get("overbought", False)),
+        # extras (harmless)
+        "ma200": float(ind.get("MA200", 0.0)),
+        "volatility_high": bool(sig.get("rally_volatility_high", False)),
+    }
+    return result
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Compute technical indicators & signals from prices.parquet")
-    ap.add_argument("--ticker", required=True, help="Ticker (directory under data/)")
-    ap.add_argument("--data-dir", default=None, help="Input root (defaults to module DATA_DIR)")
-    ap.add_argument("--out-dir", default=None, help="Output root (defaults to module OUT_DIR)")
-    args = ap.parse_args()
+    import argparse
 
-    res = run_technical(args.ticker, data_dir=args.data_dir, out_dir=args.out_dir)
-    print(f"Wrote {res['path']}")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ticker", required=True)
+    ap.add_argument("--data-root", default=None)
+    args = ap.parse_args()
+    p = compute_signals(args.ticker, data_root=args.data_root)
+    print(f"Wrote technical signals → {p}")
+
+
+__all__ = ["run_technical", "compute_signals", "DATA_DIR"]
 
 
 if __name__ == "__main__":
