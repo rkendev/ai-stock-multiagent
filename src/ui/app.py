@@ -1,10 +1,11 @@
+# src/ui/app.py
 from __future__ import annotations
 
 import os
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable, List, Dict, Any, Optional
+from typing import List, Dict
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,7 @@ import streamlit as st
 from ui.analyst_widget import render as render_analyst_widget
 
 
-# FIX: repo root is two levels up (repo/src/ui/app.py -> parents[2] == repo)
+# repo paths
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = REPO_ROOT / "data"
 OUT_ROOT = REPO_ROOT / "output"
@@ -62,7 +63,6 @@ def _load_prices(ticker: str) -> pd.DataFrame:
     """
     p = DATA_ROOT / ticker / "prices.parquet"
     if not p.exists():
-        # try output as a fallback
         p2 = OUT_ROOT / ticker / "prices.parquet"
         if p2.exists():
             p = p2
@@ -71,26 +71,20 @@ def _load_prices(ticker: str) -> pd.DataFrame:
 
     df = pd.read_parquet(p)
 
-    # 1) Flatten any MultiIndex columns
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
 
-    # 2) Normalize column names → lowercase, snake-ish
-    rename_map = {}
-    for c in df.columns:
-        k = str(c).strip().lower().replace(" ", "_")
-        rename_map[c] = k
+    rename_map = {c: str(c).strip().lower().replace(" ", "_") for c in df.columns}
     df = df.rename(columns=rename_map)
 
-    # 3) Promote common aliases to canonical names
     alias_map = {
         "close": ["close", "adj_close", "adjusted_close", "price", "close_price"],
         "ma50": ["ma50", "sma50", "moving_average_50"],
         "ma200": ["ma200", "sma200", "moving_average_200"],
     }
 
-    def first_existing(candidates: list[str]) -> str | None:
-        for n in candidates:
+    def first_existing(cands: list[str]) -> str | None:
+        for n in cands:
             if n in df.columns:
                 return n
         return None
@@ -103,7 +97,6 @@ def _load_prices(ticker: str) -> pd.DataFrame:
     if col_promote:
         df = df.rename(columns=col_promote)
 
-    # 4) Clean index → tz-naive DatetimeIndex, sorted
     if not isinstance(df.index, pd.DatetimeIndex):
         try:
             df.index = pd.to_datetime(df.index, utc=False, errors="coerce")
@@ -113,12 +106,10 @@ def _load_prices(ticker: str) -> pd.DataFrame:
         df.index = df.index.tz_localize(None)
     df = df.sort_index()
 
-    # 5) Keep only the columns we plot (others can exist but are not required)
     cols = [c for c in ["close", "ma50", "ma200"] if c in df.columns]
     return df[cols].copy() if cols else pd.DataFrame(index=df.index)
 
 
-# sentiment loader (for portfolio summary)
 def _sentiment_counts(ticker: str) -> Dict[str, float]:
     import json
 
@@ -159,17 +150,19 @@ def _sentiment_counts(ticker: str) -> Dict[str, float]:
 # Pure plotting (no I/O)
 # -----------------------
 def _price_chart(df: pd.DataFrame) -> go.Figure:
-    """
-    Build the price + moving averages chart from canonical columns.
-    Assumes columns are lowercase: close, ma50, ma200
-    """
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=df.index, y=df["close"], name="Close", mode="lines"))
     if "ma50" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["ma50"], name="MA50", mode="lines"))
     if "ma200" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["ma200"], name="MA200", mode="lines"))
-    fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10), title="Price & Moving Averages")
+    fig.update_layout(
+        title="Price & Moving Averages",
+        height=420,
+        margin=dict(l=10, r=10, t=10, b=10),
+        autosize=True,
+        width=None,
+    )
     return fig
 
 
@@ -179,16 +172,20 @@ def _rsi_panel(df: pd.DataFrame, period: int = 14) -> go.Figure:
     rsi = _rsi(df["close"], period)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=rsi.index, y=rsi.values, name=f"RSI({period})", mode="lines"))
-    # guides
     fig.add_hline(y=70, line_dash="dot", annotation_text="70 overbought", annotation_position="top left")
     fig.add_hline(y=30, line_dash="dot", annotation_text="30 oversold", annotation_position="bottom left")
     fig.update_yaxes(range=[0, 100])
-    fig.update_layout(height=180, margin=dict(l=10, r=10, t=10, b=10), title="RSI(14)")
+    fig.update_layout(
+        title="RSI(14)",
+        height=180,
+        margin=dict(l=10, r=10, t=10, b=10),
+        autosize=True,
+        width=None,
+    )
     return fig
 
 
 def _refresh(ticker: str, since: str, limit: int) -> str:
-    # Run the consolidated CLI to keep all orchestration in one place
     import subprocess
 
     cmd = [sys.executable, "-m", "cli", "refresh", "--ticker", ticker, "--since", since, "--limit", str(limit)]
@@ -204,12 +201,6 @@ def _refresh(ticker: str, since: str, limit: int) -> str:
 # Sentiment helpers
 # -----------------------
 def _sentiment_files(ticker: str) -> list[Path]:
-    """
-    Collect sentiment files from common layouts:
-      1) output/sentiment/<TICKER>/*.json
-      2) output/<TICKER>/sentiment/*.json
-      3) output/sentiment/<TICKER>.jsonl  (single JSONL file)
-    """
     candidates: list[Path] = []
     p1 = OUT_ROOT / "sentiment" / ticker
     p2 = OUT_ROOT / ticker / "sentiment"
@@ -217,7 +208,6 @@ def _sentiment_files(ticker: str) -> list[Path]:
         candidates.extend(sorted(p1.glob("*.json")))
     if p2.exists():
         candidates.extend(sorted(p2.glob("*.json")))
-    # JSONL file (single file with many lines of JSON)
     jl1 = OUT_ROOT / "sentiment" / f"{ticker}.jsonl"
     if jl1.exists():
         candidates.append(jl1)
@@ -230,7 +220,6 @@ def _read_sentiment_records(paths: list[Path]) -> list[dict]:
     recs: list[dict] = []
     for p in paths:
         if p.suffix == ".jsonl":
-            # one object per line
             for line in p.read_text().splitlines():
                 line = line.strip()
                 if not line:
@@ -259,17 +248,37 @@ def main() -> None:
     ticker = st.sidebar.selectbox("Ticker (dashboard)", all_tickers, index=0)
     st.sidebar.caption("Tip: run  `./run_mvp.sh <TICKER> <SINCE>`  to refresh data.")
     st.sidebar.markdown("---")
+
+    # Refresh control with "Last:" timestamp (per-ticker)
     st.sidebar.subheader("Refresh data (news → sentiment → report)")
     since = st.sidebar.date_input("Since (for news fetch)", date(2023, 10, 1))
     limit = st.sidebar.slider("News limit", min_value=5, max_value=100, value=20, step=5)
-    if st.sidebar.button("Refresh data now", key="refresh_btn", width="stretch"):
+
+    # Show last refresh (persisted per ticker)
+    last_key = f"last_refresh_{ticker}"
+    last_val = st.session_state.get(last_key)
+    col_btn, col_last = st.sidebar.columns([1.2, 1])
+    with col_btn:
+        do_refresh = st.button("Refresh data now", key="refresh_btn")
+    with col_last:
+        st.caption(f"Last: {last_val if last_val else '—'}")
+
+    if do_refresh:
         msg = _refresh(ticker, since.strftime("%Y-%m-%d"), limit)
         st.sidebar.success(msg)
+        # update the timestamp (local time)
+        st.session_state[last_key] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Portfolio picker
+    # Portfolio picker (persist selection) — no direct state writes + conditional default
     st.sidebar.markdown("---")
     st.sidebar.subheader("Portfolio (multi-select)")
-    portfolio = st.sidebar.multiselect("Tickers (table below)", options=all_tickers, default=all_tickers[:5])
+    default_selection = all_tickers[:5] if "portfolio_selection" not in st.session_state else None
+    portfolio = st.sidebar.multiselect(
+        "Tickers (table below)",
+        options=all_tickers,
+        default=default_selection,       # only provided on first render
+        key="portfolio_selection",       # Streamlit manages state after that
+    )
 
     st.title("AI Stock Multi-Agent")
 
@@ -300,7 +309,7 @@ def main() -> None:
             })
         if rows:
             st.markdown("### Portfolio")
-            st.dataframe(pd.DataFrame(rows), width="stretch")
+            st.dataframe(pd.DataFrame(rows))
 
     st.markdown("---")
 
@@ -316,15 +325,13 @@ def main() -> None:
         st.warning("No prices found. Use refresh or run the MVP pipeline.")
     else:
         try:
-            st.plotly_chart(_price_chart(df), use_container_width=True,
-                config={"displayModeBar": False, "responsive": True})
+            st.plotly_chart(_price_chart(df), config={"displayModeBar": False, "responsive": True})
         except Exception as e:
             st.error(f"Failed to render price chart: {e}")
 
         # RSI panel
         try:
-            st.plotly_chart(_rsi_panel(df),  use_container_width=True,
-                config={"displayModeBar": False, "responsive": True})
+            st.plotly_chart(_rsi_panel(df), config={"displayModeBar": False, "responsive": True})
         except Exception as e:
             st.error(f"Failed to render RSI panel: {e}")
 
@@ -335,7 +342,6 @@ def main() -> None:
     sig = {}
     if tech_path.exists():
         import json
-
         try:
             sig = json.loads(tech_path.read_text()).get("signals", {})
         except Exception:
@@ -368,7 +374,6 @@ def main() -> None:
         st.metric("Headlines", len(records))
 
     if records:
-        # tolerate different key names
         def _score(r: dict) -> float:
             try:
                 return float(r.get("score", r.get("polarity", 0.0)))
@@ -390,14 +395,12 @@ def main() -> None:
         with cols[3]:
             st.metric("Negative", f"{(neg * 100 / len(records)):.0f}%")
 
-        # tiny diagnostics
-        from datetime import datetime
-
+        from datetime import datetime as _dt
         latest_path = max(sent_paths, key=lambda p: p.stat().st_mtime)
         latest_time = latest_path.stat().st_mtime
         st.caption(
             f"Loaded {len(records)} records from {len(sent_paths)} file(s). "
-            f"Latest file: {latest_path.name} @ {datetime.fromtimestamp(latest_time).isoformat(sep=' ', timespec='seconds')}"
+            f"Latest file: {latest_path.name} @ {_dt.fromtimestamp(latest_time).isoformat(sep=' ', timespec='seconds')}"
         )
         ex = records[-1]
         st.caption(f'Example: {ex.get("title") or ex.get("headline") or "(no title)"}')
@@ -410,7 +413,6 @@ def main() -> None:
         with cols[3]:
             st.metric("Negative", "0%")
 
-        # why zero? tell the truth:
         news_dir1 = OUT_ROOT / "news" / ticker
         news_dir2 = OUT_ROOT / ticker / "news"
         has_news = (news_dir1.exists() and any(news_dir1.glob("*"))) or (
