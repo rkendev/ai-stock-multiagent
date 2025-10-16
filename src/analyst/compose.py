@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
+
 # ---- Fact gathering ---------------------------------------------------------
 
 def _read_json(p: Path) -> Optional[dict]:
@@ -190,3 +191,26 @@ def render_analyst_take(facts: Dict[str, Any]) -> str:
         ],
     )
     return resp.choices[0].message.content.strip() if resp and resp.choices else ""
+
+
+def log_qa(ticker: str, question: str, answer: str, out_dir: str = "output") -> str:
+    """
+    Append a single Q/A record to output/<TICKER>/analyst_qa.jsonl and return the file path.
+    Safe for repeated calls and missing directories.
+    """
+    safe = ticker.upper().strip()
+    folder = Path(out_dir) / safe
+    folder.mkdir(parents=True, exist_ok=True)
+    fpath = folder / "analyst_qa.jsonl"
+
+    rec = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ticker": safe,
+        "q": (question or "").strip(),
+        "a": (answer or "").strip(),
+        "source": "ui",        # or "reporter" later if you log from other places
+        "version": 1
+    }
+    with open(fpath, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return str(fpath)
