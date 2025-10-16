@@ -4,7 +4,9 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Iterable, List, Dict, Any, Optional
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -16,12 +18,34 @@ from ui.analyst_widget import render as render_analyst_widget
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_ROOT = REPO_ROOT / "data"
 OUT_ROOT = REPO_ROOT / "output"
+TICKERS_FILE = REPO_ROOT / "tickers_mvp.txt"
 
 
 def _pyenv() -> dict:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     return env
+
+
+# -----------------------
+# Helpers: tickers & RSI
+# -----------------------
+def _read_tickers(path: Path) -> List[str]:
+    if path.exists():
+        raw = [ln.strip() for ln in path.read_text().splitlines()]
+        return [t for t in raw if t and not t.startswith("#")]
+    return ["ASML.AS", "AAPL"]
+
+
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50.0)
 
 
 # -----------------------
@@ -38,7 +62,12 @@ def _load_prices(ticker: str) -> pd.DataFrame:
     """
     p = DATA_ROOT / ticker / "prices.parquet"
     if not p.exists():
-        return pd.DataFrame()
+        # try output as a fallback
+        p2 = OUT_ROOT / ticker / "prices.parquet"
+        if p2.exists():
+            p = p2
+        else:
+            return pd.DataFrame()
 
     df = pd.read_parquet(p)
 
@@ -89,6 +118,43 @@ def _load_prices(ticker: str) -> pd.DataFrame:
     return df[cols].copy() if cols else pd.DataFrame(index=df.index)
 
 
+# sentiment loader (for portfolio summary)
+def _sentiment_counts(ticker: str) -> Dict[str, float]:
+    import json
+
+    root1 = OUT_ROOT / "sentiment" / ticker
+    root2 = OUT_ROOT / ticker / "sentiment"
+    files: List[Path] = []
+    if root1.exists():
+        files += list(root1.glob("*.json"))
+    if root2.exists():
+        files += list(root2.glob("*.json"))
+
+    pos = neg = neu = 0
+    for f in files:
+        try:
+            obj = json.loads(f.read_text())
+        except Exception:
+            continue
+        items = obj if isinstance(obj, list) else [obj]
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            label = str(it.get("sentiment", it.get("label", ""))).upper()
+            if label == "POSITIVE":
+                pos += 1
+            elif label == "NEGATIVE":
+                neg += 1
+            else:
+                neu += 1
+    total = max(1, pos + neu + neg)
+    return {
+        "n": pos + neu + neg,
+        "pos_pct": 100.0 * pos / total,
+        "neg_pct": 100.0 * neg / total,
+    }
+
+
 # -----------------------
 # Pure plotting (no I/O)
 # -----------------------
@@ -104,6 +170,20 @@ def _price_chart(df: pd.DataFrame) -> go.Figure:
     if "ma200" in df.columns:
         fig.add_trace(go.Scatter(x=df.index, y=df["ma200"], name="MA200", mode="lines"))
     fig.update_layout(height=420, margin=dict(l=10, r=10, t=10, b=10), title="Price & Moving Averages")
+    return fig
+
+
+def _rsi_panel(df: pd.DataFrame, period: int = 14) -> go.Figure:
+    if "close" not in df.columns or len(df) < 5:
+        return go.Figure()
+    rsi = _rsi(df["close"], period)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=rsi.index, y=rsi.values, name=f"RSI({period})", mode="lines"))
+    # guides
+    fig.add_hline(y=70, line_dash="dot", annotation_text="70 overbought", annotation_position="top left")
+    fig.add_hline(y=30, line_dash="dot", annotation_text="30 oversold", annotation_position="bottom left")
+    fig.update_yaxes(range=[0, 100])
+    fig.update_layout(height=180, margin=dict(l=10, r=10, t=10, b=10), title="RSI(14)")
     return fig
 
 
@@ -167,21 +247,66 @@ def _read_sentiment_records(paths: list[Path]) -> list[dict]:
     return recs
 
 
+# -----------------------
+# APP
+# -----------------------
 def main() -> None:
     st.set_page_config(layout="wide", page_title="AI Stock Multi-Agent")
 
+    all_tickers = _read_tickers(TICKERS_FILE)
+
     st.sidebar.header("AI Stock Multi-Agent")
-    ticker = st.sidebar.selectbox("Ticker", ["ASML.AS", "AAPL"], index=0)
+    ticker = st.sidebar.selectbox("Ticker (dashboard)", all_tickers, index=0)
     st.sidebar.caption("Tip: run  `./run_mvp.sh <TICKER> <SINCE>`  to refresh data.")
     st.sidebar.markdown("---")
     st.sidebar.subheader("Refresh data (news → sentiment → report)")
     since = st.sidebar.date_input("Since (for news fetch)", date(2023, 10, 1))
     limit = st.sidebar.slider("News limit", min_value=5, max_value=100, value=20, step=5)
-    if st.sidebar.button("Refresh data now", use_container_width=True):
+    if st.sidebar.button("Refresh data now", key="refresh_btn", width="stretch"):
         msg = _refresh(ticker, since.strftime("%Y-%m-%d"), limit)
         st.sidebar.success(msg)
 
+    # Portfolio picker
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Portfolio (multi-select)")
+    portfolio = st.sidebar.multiselect("Tickers (table below)", options=all_tickers, default=all_tickers[:5])
+
     st.title("AI Stock Multi-Agent")
+
+    # -----------------------
+    # Portfolio snapshot
+    # -----------------------
+    if portfolio:
+        rows = []
+        for t in portfolio:
+            dfp = _load_prices(t)
+            if dfp.empty or "close" not in dfp.columns:
+                continue
+            last = float(dfp["close"].iloc[-1])
+            lookback = min(len(dfp) - 1, 30) if len(dfp) > 1 else 1
+            pct30 = (last / float(dfp["close"].iloc[-lookback]) - 1.0) * 100.0
+            above_ma50 = "✅" if ("ma50" in dfp.columns and last > float(dfp["ma50"].iloc[-1])) else "—"
+            above_ma200 = "✅" if ("ma200" in dfp.columns and last > float(dfp["ma200"].iloc[-1])) else "—"
+            s = _sentiment_counts(t)
+            rows.append({
+                "Ticker": t,
+                "Last": round(last, 2),
+                "30d %": f"{pct30:+.1f}%",
+                "Above MA50": above_ma50,
+                "Above MA200": above_ma200,
+                "Pos %": f"{s.get('pos_pct',0.0):.0f}%",
+                "Neg %": f"{s.get('neg_pct',0.0):.0f}%",
+                "Headlines": int(s.get("n", 0)),
+            })
+        if rows:
+            st.markdown("### Portfolio")
+            st.dataframe(pd.DataFrame(rows), width="stretch")
+
+    st.markdown("---")
+
+    # -----------------------
+    # Single-ticker dashboard
+    # -----------------------
     st.subheader(f"{ticker} — Dashboard")
 
     # Price chart
@@ -191,9 +316,17 @@ def main() -> None:
         st.warning("No prices found. Use refresh or run the MVP pipeline.")
     else:
         try:
-            st.plotly_chart(_price_chart(df), use_container_width=True)
+            st.plotly_chart(_price_chart(df), use_container_width=True,
+                config={"displayModeBar": False, "responsive": True})
         except Exception as e:
             st.error(f"Failed to render price chart: {e}")
+
+        # RSI panel
+        try:
+            st.plotly_chart(_rsi_panel(df),  use_container_width=True,
+                config={"displayModeBar": False, "responsive": True})
+        except Exception as e:
+            st.error(f"Failed to render RSI panel: {e}")
 
     st.markdown("---")
 
@@ -293,7 +426,6 @@ def main() -> None:
     # -----------------------
     st.markdown("---")
     with st.expander("AI Analyst", expanded=False):
-        # pass canonical roots as strings
         render_analyst_widget(
             ticker,
             data_dir=str(DATA_ROOT),
